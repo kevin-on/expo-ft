@@ -1,0 +1,30 @@
+[project]
+name = "expo-ft-client"
+version = "0.1.0"
+description = "EXPO-FT client (actor): rollout server and data collection for real/sim robot envs"
+requires-python = ">=3.11"
+dependencies = [
+    "absl-py>=2.0.0",
+    "droid",
+    "imageio[ffmpeg]",  # ffmpeg extra needed for MP4 episode recording
+    "ml-collections",
+    "numpy",
+    "openpi-client",
+    # cv2 comes transitively from droid as opencv-contrib-python (superset of opencv-python).
+    # Do NOT add opencv-python here — it clobbers opencv-contrib-python's cv2.aruco at install time.
+    "pyspacemouse<2",  # 2.x changed the API; client/real_utils/spacemouse.py uses 1.x's `pyspacemouse.read()`
+    "tyro",
+    "websockets~=13.1",  # 14+ tightened handshake strictness; pin to match server side
+]
+
+# This directory hosts the client deps but is not itself a buildable package —
+# the `client/` Python package is consumed via `python -m client.run_client`
+# from the repo root, with this directory's .venv activated.
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+# Paths are relative to this file (client/). droid is cloned into client/droid
+# (next to this file); openpi into ../expo_ft/agents/vla/openpi. See README.
+droid = { path = "droid", editable = true }
+openpi-client = { path = "../expo_ft/agents/vla/openpi/packages/openpi-client", editable = true }

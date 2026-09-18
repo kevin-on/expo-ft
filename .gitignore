@@ -1,0 +1,17 @@
+**/__pycache__/
+wandb/
+DROID/
+/data/
+checkpoints/
+logs/
+runs/
+paper/
+openpi/
+droid/
+expo_ft/agents/vla/openpi/
+client/droid/
+assets/
+.venv/
+client/.venv/
+
+log/
