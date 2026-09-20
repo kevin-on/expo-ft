@@ -176,13 +176,19 @@ train.FLAGS([
     "--batch_size=8", "--utd_ratio=1", "--max_steps=320", "--replan_steps=8",
     "--offline_ratio=0.5", "--client_host=127.0.0.1", "--client_port=18102",
     f"--fsdp_devices={jax.device_count()}", "--config=configs/model/expo_ft_pi_config.py",
-    "--config.N=2", "--config.n_edit_samples=2", "--config.num_qs=2",
-    f"--config.pi05_assets_dir={OUTPUT / 'assets'}", "--config.pi05_asset_id=synthetic",
-    "--config_task=configs/task/pick.py", "--config_task.control_hz=1000",
+    "--config_task=configs/task/pick.py",
     f"--dataset_path={OUTPUT / 'demo'}", f"--output_dir={OUTPUT / 'training'}",
     "--run_name=tpu-smoke", "--project_name=expo-tpu-smoke", "--overwrite",
     "--checkpoint_buffer", "--checkpoint_model", "--tqdm=false",
 ])
+# ConfigDict's dynamic CLI flags are registered from sys.argv at import time.
+# This harness calls main directly, so set these values on the parsed configs.
+train.FLAGS.config.N = 2
+train.FLAGS.config.n_edit_samples = 2
+train.FLAGS.config.num_qs = 2
+train.FLAGS.config.pi05_assets_dir = str(OUTPUT / "assets")
+train.FLAGS.config.pi05_asset_id = "synthetic"
+train.FLAGS.config_task.control_hz = 1000
 EXPOLearner.sample_actions = checked_sample
 EXPOLearner.update = checked_update
 threads = [threading.Thread(target=serve_robot, args=(i,), daemon=True) for i in range(2)]
