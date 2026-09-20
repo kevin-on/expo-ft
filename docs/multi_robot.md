@@ -46,60 +46,80 @@ the schedule starts from that actual dispatch; there is no catch-up burst.
 
 | Robot | Workstation rollout process → learner | Workstation → NUC ZeroRPC | NUC → Franka | Polymetis arm / gripper |
 |---|---|---|---|---|
-| 0 | learner:8102 | 172.16.0.1:4242 | 172.16.0.2 | 50051 / 50052 |
-| 1 | learner:8103 | 172.16.0.1:4243 | 172.16.0.3 | 50061 / 50062 |
+| 0 | learner:8102 | 172.16.0.1:4242 | 172.16.0.2 | 50053 / 50054 |
+| 1 | learner:8103 | 172.16.0.1:4243 | 172.16.0.3 | 50051 / 50052 |
 
 Learner ports are `client_port + robot_index`. Increase `num_robot` and add the
 corresponding rollout processes and independent hardware endpoints for more robots.
 Robot indices and their hardware mapping must remain fixed when resuming.
 
-## DROID patch
+## DROID fork
 
-DROID is an ignored dependency checkout. The tracked patch
-`patches/droid-multi-robot.patch` targets pd-perry/droid revision
-`076cecd2c892e644fdc106f8ba3a79482ed6e0e8` (the EXPO-FT fork). It makes the
-ZeroRPC/Polymetis ports, robot IP, gripper serial device and camera ownership
-explicit. Controller restarts terminate only the process groups owned by that
-FrankaRobot instance; the global `pkill` commands are removed.
+`scripts/multi_robot/setup_droid.py` pins
+[kevin-on/droid](https://github.com/kevin-on/droid) at
+`fef2188e9a8b0944ac076b9b159a57c2a5f43664`. This commit integrates the NUC's
+local changes with per-robot RPC/Polymetis routing, camera ownership and attach
+mode. No separate patch is applied.
 
-Apply on both workstation and NUC, before the normal DROID environment setup:
+Install the workstation dependency before client environment setup:
 
 ```bash
 python scripts/multi_robot/setup_droid.py
-# Or select a separate pinned NUC checkout:
-python scripts/multi_robot/setup_droid.py /path/to/droid
+# For local development before publishing the DROID commit:
+python scripts/multi_robot/setup_droid.py --source /scr/kevinon/workspace/droid
+# A separate NUC checkout can be selected when preparing deployment:
+python scripts/multi_robot/setup_droid.py /path/to/new/droid
 ```
 
-The script is idempotent and refuses a different base revision. It does not
-launch hardware, install system drivers or edit an existing different revision.
-Existing DROID Polymetis configuration/real-time permissions remain prerequisites.
-NUC sudo authentication still uses DROID's `sudo_password` configuration.
+Publish the DROID integration branch before using the GitHub source on another
+machine. The script clones new checkouts at the exact commit. At that revision,
+rerunning it preserves local configuration and reports local changes; it refuses
+a different revision or an existing directory inside another repository.
+It does not launch hardware, install dependencies or update the active NUC
+checkout at `/home/iliad/khhung/expoft`.
 
-Start one NUC server in each terminal, from that patched DROID directory:
+The fork retains the NUC's `/home/iliad/Utilities/miniconda3` + `expoft`
+launcher environment, per-port logs, startup/gripper readiness retries and
+cooperative waits with a 30-second ZeroRPC heartbeat. Existing 30 Hz environment
+and IK settings and gripper/move tuning are retained. Controller restarts only
+terminate process groups started by that `FrankaRobot` instance; launchers no
+longer kill by process name, port or device. Existing controller ownership must
+be resolved explicitly. NUC sudo authentication remains local DROID configuration.
+
+For a later deployment, activate the NUC `expoft` environment and start one
+server per terminal from the **new** DROID checkout, after checking active
+controllers and listeners:
 
 ```bash
 python scripts/server/run_server.py --port 4242 --robot-ip 172.16.0.2 \
-  --robot-port 50051 --gripper-port 50052 \
-  --gripper-device /dev/serial/by-id/REPLACE_WITH_FULL_DA6UJOT5_DEVICE_NAME
+  --robot-port 50053 --gripper-port 50054 \
+  --gripper-device /dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DA6UJOT5-if00-port0
 
 python scripts/server/run_server.py --port 4243 --robot-ip 172.16.0.3 \
-  --robot-port 50061 --gripper-port 50062 \
-  --gripper-device /dev/serial/by-id/REPLACE_WITH_FULL_DA6UJXZ9_DEVICE_NAME
+  --robot-port 50051 --gripper-port 50052 \
+  --gripper-device /dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DA6UJXZ9-if00-port0
 ```
 
-Use the **actual full symlink names** under `/dev/serial/by-id`; the serial alone
-is not a device path. DROID starts each controller when its rollout client creates
-the environment. `launch_controller=false` in robot JSON instead attaches to
-controllers that are already running on the configured ports.
+The original CLI names `--zerorpc-port` and `--gripper-comport` are also
+supported. These FTDI paths are the current mapping; recheck after hardware
+changes. DROID normally starts controllers when a rollout creates its
+environment. `launch_controller=false` in robot JSON instead attaches to
+**both** existing arm and gripper controllers at the configured ports; an arm
+listener alone is insufficient. Creating/resetting rollout environments is
+hardware operation, not a connectivity check.
 
 ## Cameras and rollout clients
 
 The example JSON files select the provided wrist and side serials. Robot 1's
 second wrist serial is deliberately unset. The listed three cameras include only
 one wrist; the default side+wrist policy needs a separately assigned wrist view
-for robot 1 before using that example. This patch does not share a ZED across
+for robot 1 before using that example. Its cameras are pending installation;
+fill in the actual serials when connected. This integration does not share a ZED across
 processes or invent a second wrist view. Each process opens only its listed
 camera serials. Use disjoint camera lists, including any optional recording camera.
+Camera settings are forwarded to DROID; the side-camera settings accept both
+`varied_camera` and EXPO-FT's `static_camera` alias. Missing selected cameras fail
+before a ZED wrapper is constructed.
 Both robots should use the same task/prompt and observation/action conventions;
 override robot-specific bounds and reset joints in their JSON if necessary.
 Overrides of existing NumPy array fields are converted to that field's dtype;
@@ -154,14 +174,22 @@ not promised, matching the original replay restore behavior.
 Use a separate Python 3.11 test environment; the production environments and
 their lockfiles are unchanged. Clone OpenPI's `expo_ft` branch as described in
 README first (only its lightweight openpi-client package is installed here).
+Use `uv --no-config` for this separate test environment: the root learner
+project overrides ml-dtypes/tensorstore to versions incompatible with the CPU
+test requirements.
 
 ```bash
-uv venv --python 3.11 /tmp/expo-ft-multi-test-venv
+uv venv --python 3.11 /scr/kevinon/tmp/expo-ft-multi-test-venv
 python scripts/multi_robot/setup_droid.py
-uv pip install --python /tmp/expo-ft-multi-test-venv/bin/python \
+uv --no-config pip install --python /scr/kevinon/tmp/expo-ft-multi-test-venv/bin/python \
   -r tests/cpu/requirements.txt expo_ft/agents/vla/openpi/packages/openpi-client
-JAX_PLATFORMS=cpu /tmp/expo-ft-multi-test-venv/bin/python -m pytest -q tests/cpu
+JAX_PLATFORMS=cpu /scr/kevinon/tmp/expo-ft-multi-test-venv/bin/python -m pytest -q tests/cpu client/droid/tests
 ```
+
+DROID's own offline tests check camera/RPC routing, CLI compatibility, attach
+mode, controller ownership, partial startup cleanup and preserved NUC retry and
+heartbeat behavior. EXPO-FT also verifies pinned installation, repeat setup,
+local-change preservation and refusal to overwrite a different revision.
 
 Tests exercise 1/2/3-worker barriers, updated policy versions, terminal and HIL
 transitions, failure cancellation, real localhost WebSocket round trips,

@@ -32,12 +32,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 EXPO-FT and Real-Time EXPO-FT depend on two GitHub forks - OpenPI (used by the server) and DROID (used by the client). Clone **both before running `uv sync`**. uv installs them as editable local checkouts (see the `[tool.uv.sources]` blocks in `pyproject.toml` and `client/pyproject.toml`), so `uv sync` fails if they aren't present yet. OpenPI lives under `expo_ft/agents/vla/openpi` (used by both envs); DROID lives under `client/droid` (only the client venv needs it).
 
 
-**EXPO-FT**: [modified OpenPI](https://github.com/pd-perry/openpi/tree/expo_ft) and a [DROID fork](https://github.com/pd-perry/droid). 
+**EXPO-FT**: [modified OpenPI](https://github.com/pd-perry/openpi/tree/expo_ft) and our pinned [DROID fork](https://github.com/kevin-on/droid), including the NUC setup and multi-robot integration.
 
 ```bash
 # From the repo root.
 git clone -b expo_ft https://github.com/pd-perry/openpi.git expo_ft/agents/vla/openpi
-git clone https://github.com/pd-perry/droid.git client/droid
+python scripts/multi_robot/setup_droid.py
 ```
 
 
@@ -137,7 +137,9 @@ We use a [modified fork of OpenPI](https://github.com/pd-perry/openpi/tree/real-
 
 ### DROID Setup
 
-We use a [fork of DROID](https://github.com/pd-perry/droid/tree/real-time-expo-ft) (`real-time-expo-ft` branch) for real-robot control, which adds the background camera-reading path needed to run the control loop at 30 Hz. Cloned into `./client/droid` and installed editable during the [client setup](#client-actor) step. For software, hardware setup and calibration, see the [DROID documentation](https://droid-dataset.github.io/droid/).
+Synchronous EXPO-FT uses the pinned [kevin-on/droid fork](https://github.com/kevin-on/droid); see [its setup and deployment instructions](docs/multi_robot.md#droid-fork).
+
+Real-Time EXPO-FT uses a [fork of DROID](https://github.com/pd-perry/droid/tree/real-time-expo-ft) (`real-time-expo-ft` branch) for real-robot control, which adds the background camera-reading path needed to run the control loop at 30 Hz. Cloned into `./client/droid` and installed editable during the [client setup](#client-actor) step. For software, hardware setup and calibration, see the [DROID documentation](https://droid-dataset.github.io/droid/).
 
 Configure the hardware-specific values before running the client.
 
