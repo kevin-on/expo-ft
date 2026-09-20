@@ -57,7 +57,7 @@ Robot indices and their hardware mapping must remain fixed when resuming.
 
 `scripts/multi_robot/setup_droid.py` pins
 [kevin-on/droid](https://github.com/kevin-on/droid) at
-`fef2188e9a8b0944ac076b9b159a57c2a5f43664`. This commit integrates the NUC's
+`16e5fc0d3c7a9e29d2466fd3640953166a1b934a`. This commit integrates the NUC's
 local changes with per-robot RPC/Polymetis routing, camera ownership and attach
 mode. No separate patch is applied.
 
