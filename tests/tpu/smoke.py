@@ -134,6 +134,15 @@ def checked_update(self, agent, batch, utd_ratio, actor_batch=None):
     began = time.monotonic()
     new_agent, info = original_update(self, agent, batch, utd_ratio, actor_batch)
     metrics = {key: float(value) for key, value in jax.device_get(info).items()}
+    report("update_metrics", metrics=metrics)
+    if not all(np.isfinite(value) for value in metrics.values()):
+        for name, tree in (("actor", new_agent.actor_train_state.params),
+                           ("critic", new_agent.critic.params),
+                           ("encoder", new_agent.batch_encoder.params),
+                           ("edit_actor", new_agent.edit_actor.params)):
+            bad = [jax.tree_util.keystr(path) for path, leaf in jax.tree_util.tree_leaves_with_path(tree)
+                   if not np.isfinite(np.asarray(jax.device_get(leaf))).all()]
+            report("nonfinite_parameters", group=name, count=len(bad), paths=bad[:8])
     assert all(np.isfinite(value) for value in metrics.values()), metrics
     after = hashes(new_agent)
     assert all(before[key] != after[key] for key in before), "an expected trainable parameter group did not change"
