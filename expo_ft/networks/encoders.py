@@ -63,12 +63,9 @@ class ResNetV2Encoder(nn.Module):
 
         if x.shape[-2] == 224:
             x = conv_cls(self.num_filters, (7, 7), (2, 2), padding=[(3, 3), (3, 3)])(x)
-            # Implicit -inf pool padding produces NaN stem gradients on TPU.
-            # Explicit finite padding preserves SAME's output shape and maxima.
-            spatial_pad = tuple((size % 2, 1) for size in x.shape[-3:-1])
-            pads = ((0, 0),) * (x.ndim - 3) + spatial_pad + ((0, 0),)
-            x = jnp.pad(x, pads, constant_values=jnp.finfo(x.dtype).min)
-            x = nn.max_pool(x, (3, 3), strides=(2, 2), padding="VALID")
+            # TPU v4/JAX 0.5.3: observed NaN stem-kernel gradients with SAME pooling.
+            # Explicit finite padding + VALID avoided this; root cause and GPU behavior are unverified.
+            x = nn.max_pool(x, (3, 3), strides=(2, 2), padding="SAME")
         else:
             x = conv_cls(self.num_filters, (3, 3))(x)
 
