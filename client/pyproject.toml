@@ -5,8 +5,10 @@ description = "EXPO-FT client (actor): rollout server and data collection for re
 requires-python = ">=3.11"
 dependencies = [
     "absl-py>=2.0.0",
+    "cython>=3.0.0",  # Runtime requirement of the separately installed pyzed wheel.
     "droid",
     "imageio[ffmpeg]",  # ffmpeg extra needed for MP4 episode recording
+    "ipywidgets>=8.0.4",  # Required by Open3D's installed wheel.
     "ml-collections",
     "numpy",
     "openpi-client",
