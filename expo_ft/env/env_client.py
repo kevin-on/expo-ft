@@ -31,9 +31,11 @@ class EnvClient:
     if the connection drops.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8102):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8102, reconnect: bool = True):
         self.host = host
         self.port = port
+        self.reconnect = reconnect
+        self._closed = False
         self._packer = msgpack_numpy.Packer()
         # Termination/detection piggybacked on the last get_observation() response,
         # consumed by get_info_for_step() so it needs no separate round-trip.
@@ -66,6 +68,8 @@ class EnvClient:
             self._set_nodelay(conn)
             done = threading.Event()
             with self._cond:
+                if self._closed or self._pending is not None or self._active_done is not None:
+                    return
                 self._pending = (conn, done)
                 self._cond.notify_all()
             done.wait()  # hold the connection open until the loop releases it
@@ -76,7 +80,7 @@ class EnvClient:
             self.port,
             compression=None,
             max_size=None,
-            close_timeout=100,
+            close_timeout=100 if self.reconnect else 2,
         )
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         logging.info("EnvClient listening for rollout client on %s:%s", self.host, self.port)
@@ -86,10 +90,13 @@ class EnvClient:
         self._ensure_server()
         with self._cond:
             while self._pending is None:
+                if self._closed:
+                    raise RuntimeError("Environment connection closed")
                 self._cond.wait()
             conn, done = self._pending
             self._pending = None
-        self._active_done = done
+            self._active_done = done
+            self._conn = conn
         return conn
 
     def _get_connection(self):
@@ -114,6 +121,13 @@ class EnvClient:
 
     def close(self):
         """Drop the connection and stop the accept server (used on env recovery)."""
+        with self._cond:
+            self._closed = True
+            if self._pending is not None:
+                conn, done = self._pending
+                done.set()
+                self._pending = None
+            self._cond.notify_all()
         self._close_connection()
         if self._server is not None:
             try:
@@ -126,6 +140,8 @@ class EnvClient:
         last_exc = None
         for attempt in range(3):
             try:
+                if self._closed:
+                    raise RuntimeError("Environment connection closed")
                 conn = self._get_connection()
                 conn.send(self._packer.pack({"operation": operation, **request}))
                 recv_start = time.time()
@@ -138,6 +154,8 @@ class EnvClient:
                     )
                 return response
             except _RETRY_EXC as e:
+                if not self.reconnect or self._closed:
+                    raise RuntimeError(f"EnvClient {operation} disconnected") from e
                 last_exc = e
                 self._close_connection()
                 if attempt < 2:
@@ -165,6 +183,7 @@ class EnvClient:
 
     def reset(self, env_id: str) -> Tuple[Dict[str, Any], bool]:
         """Reset an environment."""
+        self._last_info = None
         response = self._call_operation("reset", {"env_id": env_id})
         return response["observation"], response["done"]
 
@@ -208,17 +227,23 @@ class EnvClient:
 class EnvClientWrapper:
     """Gym-like interface around EnvClient."""
 
-    def __init__(self, env_creation_request: dict, host: str = "0.0.0.0", port: int = 8102):
+    def __init__(self, env_creation_request: dict, host: str = "0.0.0.0", port: int = 8102,
+                 recover: bool = True, lazy: bool = False):
         """Initialize the wrapper. Binds host:port and waits for the rollout client
         to dial in (see EnvClient)."""
         self.host = host
         self.port = port
-        self.client = EnvClient(host=host, port=port)
-        self.env_id, self.task_description = self.client.create_env(env_creation_request)
+        self.recover = recover
+        self.client = EnvClient(host=host, port=port, reconnect=recover)
+        self.env_id = None
+        if not lazy:
+            self.env_id, self.task_description = self.client.create_env(env_creation_request)
         self.env_creation_request = env_creation_request
 
     def _call(self, op_name: str, thunk):
         """Run an op; if the server returns an error, recreate env + reset, then retry."""
+        if not self.recover:
+            return thunk()
         status = "normal"
         while True:
             if status == "normal":
@@ -247,8 +272,13 @@ class EnvClientWrapper:
 
     def reset(self):
         """Reset the environment and return observation."""
+        if self.env_id is None:
+            self.env_id, self.task_description = self.client.create_env(self.env_creation_request)
         observation, _ = self._call("reset", lambda: self.client.reset(self.env_id))
         return observation
+
+    def close(self):
+        self.client.close()
 
     def step(self, action):
         """Step the environment. Returns (real_executed_action, action_type)."""

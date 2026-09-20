@@ -422,8 +422,28 @@ class PiReplayBuffer(Dataset):
             episode_ends.append(dataset_len)
         return episode_starts, episode_ends
     
-    def _gather(self, role: str, arr: np.ndarray, indices: np.ndarray) -> np.ndarray:
+    def allocate_sample_batch(self, batch_size: int) -> dict:
+        """Allocate one complete host batch for sequential multi-robot filling."""
+        fields = dict(self.dataset_dict)
+        next_keys = [k for st in self._gather_storage for k in (st, st + "_mask")] + ["state"]
+        for prefix in ("next_", "next_delayed_"):
+            fields.update({prefix + key: self.dataset_dict[key] for key in next_keys})
+        fields["next_delayed_actions"] = self.dataset_dict["actions"]
+        fields["valids"] = np.empty((0,), dtype=np.float32)
+        batch = {}
+        for key, arr in fields.items():
+            if self._delay == 0 and key.startswith("next_delayed_") and key != "next_delayed_actions":
+                batch[key] = batch[key.replace("next_delayed_", "next_", 1)]
+            else:
+                batch[key] = np.empty((batch_size, *arr.shape[1:]), dtype=arr.dtype)
+        return batch
+
+    def _gather(self, role: str, arr: np.ndarray, indices: np.ndarray, out=None) -> np.ndarray:
         """Row gather through the reused staging arena (big tensors only)."""
+        if out is not None:
+            if arr.ndim < 3 or len(indices) < _GATHER_MIN_ROWS:
+                return np.take(arr, indices, axis=0, out=out)
+            return _take_rows(arr, indices, out=out)
         n = len(indices)
         if arr.ndim < 3 or n < _GATHER_MIN_ROWS:
             return arr[indices]
@@ -436,7 +456,8 @@ class PiReplayBuffer(Dataset):
         return _take_rows(arr, indices, out=out)
 
     def sample_jax(self, batch_size: int, keys=None, data_sharding=None,
-                       hil_only: bool = False, success_only: bool = False):
+                       hil_only: bool = False, success_only: bool = False, out=None):
+        """Sample a batch; with out, fill supplied host-array slices instead of JAX arrays."""
         n_step = self._replan_steps  # critic reward window: one executed chunk
         assert len(self) >= n_step, "Replay buffer size must be greater than the sample window"
         if not hasattr(self, "rng"):
@@ -474,7 +495,10 @@ class PiReplayBuffer(Dataset):
             )
         self.rng = rng
 
-        jax_dataset_dict = {k: self._gather(k, self.dataset_dict[k], indices) for k in keys}
+        def gather(role, arr, row_indices):
+            return self._gather(role, arr, row_indices, out=None if out is None else out[role])
+
+        jax_dataset_dict = {k: gather(k, self.dataset_dict[k], indices) for k in keys}
 
         next_indices = (indices + n_step) % self._capacity
         # Obs `delay` env-steps before next_state (env time t' - delay). Used by
@@ -484,7 +508,7 @@ class PiReplayBuffer(Dataset):
 
         _dd = self.dataset_dict
         img_keys = [k for st in self._gather_storage for k in (st, st + "_mask")]
-        nxt = {k: self._gather("next_" + k, _dd[k], next_indices) for k in img_keys}
+        nxt = {k: gather("next_" + k, _dd[k], next_indices) for k in img_keys}
         next_st = _dd["state"][next_indices]
 
         if self._delay == 0:
@@ -493,7 +517,7 @@ class PiReplayBuffer(Dataset):
             nd = nxt
             nd_st = next_st
         else:
-            nd = {k: self._gather("nd_" + k, _dd[k], next_delayed_indices) for k in img_keys}
+            nd = {k: gather("next_delayed_" + k, _dd[k], next_delayed_indices) for k in img_keys}
             nd_st = _dd["state"][next_delayed_indices]
 
         jax_dataset_dict.update(
@@ -538,6 +562,13 @@ class PiReplayBuffer(Dataset):
                 _idx = (indices - j) % self._capacity
                 _cross |= np.asarray(self.dataset_dict["dones"][_idx]) > 0.5
             jax_dataset_dict["valids"] = jax_dataset_dict["valids"] * (1.0 - _cross.astype(np.float32))
+
+        if out is not None:
+            # Images were gathered directly into their final slices. Copy the
+            # small derived fields (n-step masks/rewards/state) into the same batch.
+            for key, value in jax_dataset_dict.items():
+                out[key][...] = value
+            return out
 
         def to_jax_array(x):
             """Recursively convert numpy arrays to JAX arrays, handling nested dicts."""

@@ -36,12 +36,17 @@ class DroidEnv(RobotEnv):
         record_camera = None,
         **kwargs,
     ):
+        robot_kwargs = {key: kwargs[key] for key in (
+            "robot_server_ip", "robot_server_port", "launch_controller", "camera_serials",
+            "wrist_camera_serial", "camera_kwargs",
+        ) if key in kwargs}
         super().__init__(
             action_space=action_space,
             gripper_action_space=gripper_action_space,
             reset_joints=reset_joints,
             randomize_low=randomize_low,
             randomize_high=randomize_high,
+            **robot_kwargs,
         )
         self.camera_reader.set_trajectory_mode()
         
@@ -215,6 +220,7 @@ class DroidEnv(RobotEnv):
 
     def close(self):
         try:
+            self.camera_reader.disable_cameras()
             super().close()
         except Exception:
             pass

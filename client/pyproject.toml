@@ -12,7 +12,7 @@ dependencies = [
     "openpi-client",
     # cv2 comes transitively from droid as opencv-contrib-python (superset of opencv-python).
     # Do NOT add opencv-python here — it clobbers opencv-contrib-python's cv2.aruco at install time.
-    "pyspacemouse<2",  # 2.x changed the API; client/real_utils/spacemouse.py uses 1.x's `pyspacemouse.read()`
+    "pyspacemouse<2",  # 2.x changed the device selection/read API used by client/real_utils/spacemouse.py.
     "tyro",
     "websockets~=13.1",  # 14+ tightened handshake strictness; pin to match server side
 ]

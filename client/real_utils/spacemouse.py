@@ -6,11 +6,11 @@ import pyspacemouse
 from typing import Tuple
 
 class SpaceMousePolicy:
-    def __init__(self, max_lin_vel=1, max_rot_vel=1):
+    def __init__(self, max_lin_vel=1, max_rot_vel=1, device_number=0, device_path=None):
         self.movement_enabled = False
         self.max_lin_vel = max_lin_vel
         self.max_rot_vel = max_rot_vel
-        self.spacemouse = SpaceMouseExpert()
+        self.spacemouse = SpaceMouseExpert(device_number=device_number, device_path=device_path)
         # One-shot flags for keyboard A/B (e.g. calibration); set by GUI, read and cleared by get_info()
         self._virtual_success = False
         self._virtual_failure = False
@@ -90,8 +90,20 @@ class SpaceMouseExpert:
     a "get_action" method to get the latest action and button state.
     """
 
-    def __init__(self):
-        pyspacemouse.open()
+    def __init__(self, device_number=0, device_path=None):
+        if device_path is None:
+            self.device = pyspacemouse.open(DeviceNumber=device_number)
+        else:
+            # PySpaceMouse 1.x otherwise chooses the first model even with path=.
+            # Resolve the requested HID's model so both its path and decoder match.
+            hid = next((dev for dev in pyspacemouse.Enumeration().find() if dev.path == device_path), None)
+            if hid is None:
+                raise ValueError(f"SpaceMouse HID path not found: {device_path}")
+            name = next((name for name, spec in pyspacemouse.device_specs.items()
+                         if (hid.vendor_id, hid.product_id) == tuple(spec.hid_id)), None)
+            if name is None:
+                raise ValueError(f"Unsupported SpaceMouse at HID path: {device_path}")
+            self.device = pyspacemouse.open(device=name, path=device_path)
 
         self.state_lock = threading.Lock()
         # Pre-allocate arrays to avoid allocation inside lock
@@ -105,7 +117,7 @@ class SpaceMouseExpert:
     def _read_spacemouse(self):
         """Continuously read spacemouse in background thread."""
         while True:
-            state = pyspacemouse.read()
+            state = self.device.read()
             if state is not None:
                 # Create array outside lock to minimize lock time
                 action = np.array(

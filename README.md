@@ -128,6 +128,9 @@ You can plug in your own online fine-tuning algorithm by implementing it in `exp
 
 ## Running Experiments with DROID + pi0.5
 
+For synchronous collection from multiple robots with one shared policy, see
+[Multi-robot EXPO-FT](docs/multi_robot.md).
+
 ### OpenPI Setup
 
 We use a [modified fork of OpenPI](https://github.com/pd-perry/openpi/tree/real-time-expo-ft) (`real-time-expo-ft` branch) with support for frozen encoder training (for efficient action sampling) and Cartesian action control for DROID, plus the prefix-inpainted sampling and per-token adaRMS conditioning Real-Time EXPO-FT's `--delay` relies on. It builds on the [EXPO-FT fork](https://github.com/pd-perry/openpi/tree/expo_ft). Cloned into `./expo_ft/agents/vla/openpi` and installed editable during the [server setup](#server-learner) step (see [Clone the forks](#clone-the-forks)). The same checkout provides the SFT pretraining scripts wrapped below.

@@ -62,6 +62,7 @@ flags.DEFINE_integer("fsdp_devices", 1, "Number of FSDP devices for sharding.")
 
 flags.DEFINE_string("client_host", "0.0.0.0", "Bind host to listen on; the rollout client dials in.")
 flags.DEFINE_integer("client_port", 8102, "Bind port to listen on.")
+flags.DEFINE_integer("num_robot", 1, "Robots per synchronous round; clients dial client_port + robot index.")
 
 flags.DEFINE_integer("replan_steps", 8, "Number of replan steps for evaluation.")
 flags.DEFINE_integer(
@@ -90,6 +91,16 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     init_logging()
+    if FLAGS.num_robot < 1:
+        raise ValueError("num_robot must be positive")
+    multi_robot = FLAGS.num_robot > 1
+    if multi_robot:
+        if FLAGS.update_type != "episode" or FLAGS.config.model_cls != "EXPOLearner" or FLAGS.delay != 0:
+            raise ValueError("Multi-robot rounds currently require EXPOLearner, update_type=episode, delay=0")
+        if FLAGS.num_updates < 0 or FLAGS.step_interval < 1 or FLAGS.replan_steps < 1:
+            raise ValueError("Require num_updates >= 0, step_interval >= 1 and replan_steps >= 1")
+        if FLAGS.resume and not FLAGS.checkpoint_buffer:
+            raise ValueError("Multi-robot resume requires checkpoint_buffer and saved robot replay records")
     assert FLAGS.offline_ratio >= 0.0 and FLAGS.offline_ratio <= 1.0
 
     if FLAGS.batch_size % jax.device_count() != 0:
@@ -169,6 +180,10 @@ def main(_):
         critic_camera_keys=critic_camera_keys,
     )
     replay_buffer = create_replay_buffer(**rb_args)
+    replay_buffers = [replay_buffer]
+    if multi_robot:
+        replay_buffers += [create_replay_buffer(**{**rb_args, "seed": FLAGS.seed + index})
+                           for index in range(1, FLAGS.num_robot)]
     offline_replay_buffer = create_replay_buffer(**rb_args)
 
     actor_success_only = getattr(FLAGS.config, "actor_success_only", False)
@@ -182,15 +197,17 @@ def main(_):
         actor_success_only=actor_success_only,
         use_dagger_hil_sampling=use_dagger_hil_sampling,
         dataset=dataset,
+        replay_buffers=replay_buffers if multi_robot else None,
     )
 
+    example_buffer = replay_buffer if multi_robot and FLAGS.offline_ratio == 0 else offline_replay_buffer
     critic_example = {
-        _critic_key_to_storage(k): offline_replay_buffer.dataset_dict[_critic_key_to_storage(k)][0][np.newaxis]
+        _critic_key_to_storage(k): example_buffer.dataset_dict[_critic_key_to_storage(k)][0][np.newaxis]
         for k in critic_camera_keys
     }
-    critic_example["state"] = offline_replay_buffer.dataset_dict['state'][0][np.newaxis]
-    critic_example["actions"] = offline_replay_buffer.dataset_dict['actions'][0][np.newaxis]
-    agent_example_observation, agent_example_state, agent_example_action = offline_replay_buffer.convert_to_critic_format(
+    critic_example["state"] = example_buffer.dataset_dict['state'][0][np.newaxis]
+    critic_example["actions"] = example_buffer.dataset_dict['actions'][0][np.newaxis]
+    agent_example_observation, agent_example_state, agent_example_action = example_buffer.convert_to_critic_format(
         critic_example)
     actor.action_dim = agent_example_action.squeeze().shape[-1]
     actor.state_dim = agent_example_state.squeeze().shape[-1]
@@ -228,7 +245,14 @@ def main(_):
         if latest_step is not None:
             start_step = latest_step
             logging.info("Resuming from step %d", start_step)
-        batch_processor.restore(checkpoint_dir_path, up_to_step=latest_step)
+        if not multi_robot:
+            batch_processor.restore(checkpoint_dir_path, up_to_step=latest_step)
+
+    if multi_robot:
+        from expo_ft.utils.multi_robot_training import train_multi_robot
+        train_multi_robot(FLAGS, agent, replay_buffers, batch_processor, checkpoint_manager,
+                          checkpoint_dir, train_video_dir, save_checkpoint, start_step, resuming, replicated_sharding)
+        return
 
     # The env is created only now: EnvClientWrapper blocks until the rollout client
     # dials in, and the agent build above is the slow part.

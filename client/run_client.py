@@ -9,6 +9,7 @@ Supports operations: create_env, reset, step, get_observation, get_info_for_step
 import asyncio
 import dataclasses
 import logging
+import json
 import os
 import socket
 import time
@@ -69,11 +70,13 @@ class Args:
     port: int = 8102
     config_task_path: str = "configs/task/pick.py"
     step_timing_threshold_ms: float = 30.0
+    robot_config: Optional[str] = None
 
 
 _env_storage: Dict[str, Any] = {}
 _config_task_path: Optional[str] = None
 _task_config: Optional[Any] = None
+_robot_config: dict = {}
 # Monotonic suffix so each create_env yields a distinct env_id. Without this, two trainers that share
 # one server (same env_name+env_usage) collide on a single env instance and corrupt each other's
 # rollouts. Per-job unique ports (see train_robo_car_launch.sh) prevent sharing; this isolates envs
@@ -89,12 +92,16 @@ _HUMAN_OVERRIDE_NORM_THRESHOLD = 1e-4
 def _get_human_override_action(task_config: Optional[Any] = None) -> tuple:
     """Return (action_7d or None, is_human). Assumes 7D action space."""
     global _spacemouse_policy
+    if not getattr(task_config, "enable_spacemouse", True):
+        return None, False
     try:
         if _spacemouse_policy is None:
             from client.real_utils.spacemouse import SpaceMousePolicy
             _spacemouse_policy = SpaceMousePolicy(
                 max_lin_vel=task_config.collect_max_lin_vel,
                 max_rot_vel=task_config.collect_max_rot_vel,
+                device_number=getattr(task_config, "spacemouse_device_number", 0),
+                device_path=getattr(task_config, "spacemouse_device_path", None),
             )
         action_7d, _ = _spacemouse_policy.forward(None, include_info=True)
         is_active = np.linalg.norm(action_7d[:6]) > _HUMAN_OVERRIDE_NORM_THRESHOLD
@@ -127,6 +134,11 @@ async def _handle_environment_request(websocket):
                 
                 if operation == "create_env":
                     task_config = load_task_config(_config_task_path)
+                    for key, value in _robot_config.items():
+                        current = task_config.get(key)
+                        if isinstance(current, np.ndarray):
+                            value = np.asarray(value, dtype=current.dtype)
+                        task_config[key] = value
                     _task_config = task_config
                     env_name = task_config.env_name
                     env_usage = request["env_usage"]
@@ -296,6 +308,10 @@ async def _handle_environment_request(websocket):
         logger.debug(f"Connection closed: {websocket.remote_address}")
     except Exception as e:
         logger.error(f"Unexpected error in request handler: {e}", exc_info=True)
+    finally:
+        for env in _env_storage.values():
+            env.close()
+        _env_storage.clear()
 
 
 async def _run_client(
@@ -333,6 +349,10 @@ async def _run_client(
 
 async def main_async(args: Args) -> None:
     """Main async entry point."""
+    global _robot_config
+    if args.robot_config:
+        with open(args.robot_config) as file:
+            _robot_config = json.load(file)
     await _run_client(
         args.host,
         args.port,
