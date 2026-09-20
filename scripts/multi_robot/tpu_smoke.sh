@@ -43,6 +43,7 @@ save_results() {
 }
 trap save_results EXIT
 
-JAX_PLATFORMS=cpu python -m pytest -q tests/cpu/test_robot_round.py \
-    2>&1 | tee "$EXPO_SMOKE_OUTPUT/cpu-round-tests.txt"
+python scripts/multi_robot/setup_droid.py
+JAX_PLATFORMS=cpu python -m pytest -q tests/cpu \
+    2>&1 | tee "$EXPO_SMOKE_OUTPUT/cpu-tests.txt"
 timeout 45m python tests/tpu/smoke.py 2>&1 | tee "$EXPO_SMOKE_OUTPUT/run.txt"
