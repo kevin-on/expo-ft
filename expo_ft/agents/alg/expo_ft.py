@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import orbax.checkpoint as ocp
-from flax import struct
+from flax import nnx, struct
 from flax.training.train_state import TrainState
 
 import numpy as np
@@ -474,16 +474,23 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
         full_mask = jnp.tile(mask, self.replan_steps)
         return edit * full_mask
 
-    def cache_infer_params(self):
+    def cache_infer_params(self, previous_cache=None):
         """Copy params onto infer_sharding for rollout sampling.
 
         sample_actions reads _infer_cache to avoid device_put on every env step.
         Call again after update() so rollouts use the latest weights.
         """
         s = self.actor.infer_sharding
+        params = self.actor_train_state.params
+        if previous_cache is not None:
+            # Frozen base weights do not change during updates; keep their device buffers.
+            params = nnx.State.merge(
+                previous_cache["actor_train_state"].params,
+                jax.device_put(params.filter(self.actor.train_config.trainable_filter), s),
+            )
         return self.replace(_infer_cache={
             # Rollout only binds model parameters; optimizer moments stay on the learner mesh.
-            "actor_train_state": jax.device_put(dataclasses.replace(self.actor_train_state, opt_state=()), s),
+            "actor_train_state": jax.device_put(dataclasses.replace(self.actor_train_state, params=params, opt_state=()), s),
             "batch_encoder_params": jax.device_put(self.batch_encoder.params, s),
             "edit_actor_params": jax.device_put(self.edit_actor.params, s),
             "target_critic_params": jax.device_put(self.target_critic.params, s),
@@ -873,7 +880,7 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
         new_agent, info = self.replace(_infer_cache=None)._update_jit(
             agent.replace(_infer_cache=None), batch, utd_ratio, actor_batch
         )
-        return new_agent.cache_infer_params(), info
+        return new_agent.cache_infer_params(self._infer_cache), info
 
 
     @partial(jax.jit, static_argnames="utd_ratio")
