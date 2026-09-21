@@ -9,7 +9,11 @@ It does not validate the separate LeRobot conversion / offline SFT pipeline.
 
 ## Scope of these scripts
 
-These scripts preserve the iris-ws-5 experimental setup. They intentionally keep
+**For Delta H200, use [the reusable Delta launcher](delta/README.md) and its
+[validation results](delta/VALIDATION.md).** The `delta/` scripts accept input and
+output paths and run the current checkout inside the validated SIF.
+
+The other scripts here preserve the iris-ws-5 experimental setup. They intentionally keep
 workstation paths and Stanford Iris/Iliad Slurm accounts, partitions and storage
 paths so later experiments can use the tested commands as references. They are
 not portable cluster defaults: check GPU hosts, resource requests and filesystem
