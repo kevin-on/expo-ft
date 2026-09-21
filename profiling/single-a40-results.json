@@ -1,0 +1,121 @@
+{
+  "base_commit": "f92c32a0d1eae3aca2282ff1787228c60b55a9be",
+  "job_id": 17534126,
+  "batch_size": 2,
+  "utd_ratio": 1,
+  "gpu_count": 1,
+  "production_change_applied": false,
+  "baseline": {
+    "seconds": [
+      300.1530946707353,
+      153.62982831615955,
+      155.5939923832193,
+      1.1574293682351708,
+      1.1640520188957453,
+      1.1673792842775583
+    ],
+    "jit_cache_sizes": [
+      1,
+      2,
+      3,
+      3,
+      3,
+      3
+    ],
+    "xla_compile_seconds": [
+      284.991782904,
+      145.060024738,
+      146.824567795
+    ],
+    "all_six_updates_finite_and_trainable_groups_changed": true,
+    "first_metrics": {
+      "actor_grad_norm": 1.215312123298645,
+      "actor_loss": 0.16626684367656708,
+      "actor_lr": 2.499999936844688e-05,
+      "actor_param_norm": 1803.770751953125,
+      "actor_state_step": 0.0,
+      "critic_grad_norm": 26.16301727294922,
+      "critic_loss": 2.032146692276001,
+      "critic_param_norm": 128.71803283691406,
+      "edit_actor_loss": 61.62266159057617,
+      "edit_q": -0.6442147493362427,
+      "entropy": -60.97844696044922,
+      "mean_d_actions_norm": 3.156606435775757,
+      "mean_edit_scaled_norm": 0.7220325469970703,
+      "next_q_nan_ratio": 0.0,
+      "q": 0.2425885945558548,
+      "q_max": 3.314364433288574,
+      "q_min": -1.847223162651062,
+      "select_ratio_with_edit": 1.0,
+      "select_ratio_without_edit": 0.0,
+      "target_critic_param_norm": 128.7169647216797,
+      "target_q_max": -0.30838435888290405,
+      "target_q_mean": -0.31640297174453735,
+      "target_q_min": -0.32442161440849304,
+      "temperature": 1.0,
+      "temperature_loss": -32.97844696044922
+    },
+    "warm_mean_seconds": 1.1629535571361582
+  },
+  "fixed": {
+    "seconds": [
+      304.2916196649894,
+      153.47191905602813,
+      1.1694016437977552,
+      1.1588826850056648,
+      1.1563698379322886,
+      1.166478912346065
+    ],
+    "jit_cache_sizes": [
+      1,
+      2,
+      2,
+      2,
+      2,
+      2
+    ],
+    "xla_compile_seconds": [
+      289.039320707,
+      146.435494423
+    ],
+    "all_six_updates_finite_and_trainable_groups_changed": true,
+    "first_metrics": {
+      "actor_grad_norm": 1.2199772596359253,
+      "actor_loss": 0.16588327288627625,
+      "actor_lr": 2.499999936844688e-05,
+      "actor_param_norm": 1803.770751953125,
+      "actor_state_step": 0.0,
+      "critic_grad_norm": 26.150184631347656,
+      "critic_loss": 2.031970739364624,
+      "critic_param_norm": 128.71804809570312,
+      "edit_actor_loss": 61.11994934082031,
+      "edit_q": -0.648460865020752,
+      "entropy": -60.47148895263672,
+      "mean_d_actions_norm": 3.1566965579986572,
+      "mean_edit_scaled_norm": 0.7220336198806763,
+      "next_q_nan_ratio": 0.0,
+      "q": 0.24213457107543945,
+      "q_max": 3.314690113067627,
+      "q_min": -1.8487107753753662,
+      "select_ratio_with_edit": 1.0,
+      "select_ratio_without_edit": 0.0,
+      "target_critic_param_norm": 128.7169647216797,
+      "target_q_max": -0.3085494041442871,
+      "target_q_mean": -0.3165314197540283,
+      "target_q_min": -0.32451340556144714,
+      "temperature": 1.0,
+      "temperature_loss": -32.47148895263672
+    },
+    "warm_mean_seconds": 1.1627832697704434
+  },
+  "candidate_validation": {
+    "strict_comparison_passed": false,
+    "first_failing_metric": "actor_grad_norm",
+    "relative_difference": 0.0038386322721919272,
+    "rtol": 0.0001,
+    "atol": 1e-05,
+    "update_executable_count": 2,
+    "required_update_executable_count": 1
+  },
+  "gpu": "name, uuid, memory.total [MiB], driver_version\nNVIDIA A40, GPU-b0df5ee7-1dac-1eb9-6561-a96f5d6a6eb4, 46068 MiB, 610.43.02"
+}
