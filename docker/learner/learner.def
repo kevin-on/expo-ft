@@ -1,0 +1,28 @@
+Bootstrap: docker
+From: python:3.11-slim-trixie
+
+%files
+    source/ /opt/expo-ft
+
+%post
+    set -eu
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates git libglib2.0-0 libgl1
+    rm -rf /var/lib/apt/lists/*
+    python -m pip install --no-cache-dir uv==0.8.22
+    uv pip install --system --no-cache torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+    uv pip install --system --no-cache -r /opt/expo-ft/docker/learner/requirements.in
+    uv pip check --system
+    uv pip freeze --system > /opt/expo-ft/docker/learner/requirements-installed.txt
+    cd /opt/expo-ft
+    PYTHONPATH=/opt/expo-ft:/opt/expo-ft/expo_ft/agents/vla/openpi/src:/opt/expo-ft/expo_ft/agents/vla/openpi/packages/openpi-client/src JAX_PLATFORMS=cpu python -c 'import train_pi_robo; from expo_ft.agents.alg.expo_ft import EXPOLearner'
+
+%environment
+    export PYTHONPATH=/opt/expo-ft:/opt/expo-ft/expo_ft/agents/vla/openpi/src:/opt/expo-ft/expo_ft/agents/vla/openpi/packages/openpi-client/src
+    export PYTHONUNBUFFERED=1
+    export WANDB_MODE=disabled
+    export TOKENIZERS_PARALLELISM=false
+
+%runscript
+    cd /opt/expo-ft
+    exec python tests/gpu/learner_smoke.py "$@"

@@ -1,0 +1,10 @@
+# Copy this to the build context root, or pass a filtered source archive.
+.git
+.venv
+client
+checkpoints
+logs
+data
+**/__pycache__
+**/.git
+**/.venv
