@@ -399,11 +399,12 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
             out_shardings=critic_sharding,
         )(critic)
 
+        # Match the online critic's initialized shardings before the first update.
         target_critic = TrainState.create(
             apply_fn=critic_def.apply,
-            params=critic_params,
+            params=critic.params,
             tx=optax.GradientTransformation(lambda _: None, lambda _: None),
-        )
+        ).replace(step=critic.step)
 
         temp_def = Temperature(init_temperature)
         temp_params = temp_def.init(temp_key)["params"]
@@ -434,15 +435,15 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
             edit_scale=edit_scale,
             edit_action_xyzg=edit_action_xyzg,
             batch_split=batch_split,
-            actor_tau=actor_tau,
+            actor_tau=jax.device_put(actor_tau, replicated_sharding),
             critic=critic,
             target_critic=target_critic,
             batch_encoder=batch_encoder,
             temp=temp,
-            target_entropy=target_entropy,
-            entropy_scale=entropy_scale,
-            tau=tau,
-            discount=discount,
+            target_entropy=jax.device_put(target_entropy, replicated_sharding),
+            entropy_scale=jax.device_put(entropy_scale, replicated_sharding),
+            tau=jax.device_put(tau, replicated_sharding),
+            discount=jax.device_put(discount, replicated_sharding),
             num_qs=num_qs,
             num_min_qs=num_min_qs,
             data_augmentation_fn=make_data_augmentation_fn(use_full_augmentation),

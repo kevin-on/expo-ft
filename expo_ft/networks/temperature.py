@@ -9,6 +9,6 @@ class Temperature(nn.Module):
     def __call__(self) -> jnp.ndarray:
         log_temp = self.param(
             "log_temp",
-            init_fn=lambda key: jnp.full((), jnp.log(self.initial_temperature)),
+            init_fn=lambda key: jnp.full((), jnp.log(self.initial_temperature), dtype=jnp.float32),
         )
         return jnp.exp(log_temp)
