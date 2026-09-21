@@ -4,7 +4,7 @@
 #SBATCH --job-name=expo-update-profile
 #SBATCH --time=01:00:00
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 #SBATCH --gres=gpu:a40:1
 #SBATCH --chdir=/iris/u/kevinon/workspace/expo-ft-update-profile
 #SBATCH --output=/iris/u/kevinon/outputs/expo-ft-update-profile/logs/%x-%j.out
@@ -31,11 +31,17 @@ recover() {
     rc=$?
     trap - EXIT TERM INT
     if [[ -n "$monitor_pid" ]]; then kill "$monitor_pid" 2>/dev/null || true; wait "$monitor_pid" 2>/dev/null || true; fi
-    # Checkpoint payloads stay local; preserve logs, normalization, and comparison results.
-    tar -C "$STAGE/output" --exclude='./small/checkpoint' --exclude='./default/checkpoint' \
-      --exclude='*/jax-cache' --exclude='./cache' --exclude='./hf' --exclude='./cuda-cache' \
-      -czf "$RESULTS/results.tar.gz" . || true
+    # Publish compact diagnostics first, then atomically publish the full archive.
+    cp "$STAGE/output/comparison.json" "$RESULTS/" 2>/dev/null || true
     cp "$STAGE/output/run-status.txt" "$RESULTS/" 2>/dev/null || true
+    excludes=(--exclude='./small/checkpoint' --exclude='./default/checkpoint'
+      --exclude='*/jax-cache' --exclude='./cache' --exclude='./hf' --exclude='./cuda-cache')
+    if tar -C "$STAGE/output" "${excludes[@]}" --exclude='*/final-trainable.npz' -cf - . | gzip -1 > "$RESULTS/diagnostics.tar.gz.partial"; then
+        mv "$RESULTS/diagnostics.tar.gz.partial" "$RESULTS/diagnostics.tar.gz"
+    fi
+    if tar -C "$STAGE/output" "${excludes[@]}" -cf - . | gzip -1 > "$RESULTS/results.tar.gz.partial"; then
+        mv "$RESULTS/results.tar.gz.partial" "$RESULTS/results.tar.gz"
+    fi
     printf '%s\n' "$rc" > "$RESULTS/exit-code.txt"
     printf 'Validation outputs: %s\n' "$RESULTS"
     exit "$rc"
@@ -46,7 +52,7 @@ trap 'exit 130' INT
 hostname
 printf 'Local stage: %s\nCUDA_VISIBLE_DEVICES=%s\n' "$STAGE" "${CUDA_VISIBLE_DEVICES:-}"
 df -h "$STAGE"
-nvidia-smi --query-gpu=name,uuid,memory.total,driver_version --format=csv > "$STAGE/output/gpu.txt"
+nvidia-smi --id="${CUDA_VISIBLE_DEVICES}" --query-gpu=name,uuid,memory.total,driver_version --format=csv > "$STAGE/output/gpu.txt"
 image_source=/iris/u/kevinon/artifacts/expo-ft/expo-ft-learner-jax053.sif
 cache_source=/iliad/u/kevinon/artifacts/expo-ft/openpi-cache
 if [[ -n "${EXPO_LOCAL_INPUT_ROOT:-}" && -f "$EXPO_LOCAL_INPUT_ROOT/openpi-cache/manifest.json" && -f "$EXPO_LOCAL_INPUT_ROOT/learner.sif" ]]; then
@@ -59,6 +65,7 @@ cp ./learner_smoke.py "$STAGE/learner_smoke.py"
 cp ./baseline_expo_ft.py "$STAGE/expo_ft.py"
 cp ./baseline_temperature.py "$STAGE/temperature.py"
 cp ./compare_profile.py "$STAGE/compare_profile.py"
+cp ./compare_lowering.py "$STAGE/compare_lowering.py"
 sha256sum ./*.py > "$STAGE/output/source-sha256.txt"
 export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
 export APPTAINERENV_JAX_PLATFORMS=cuda
@@ -73,16 +80,24 @@ export APPTAINERENV_WANDB_DIR=/output/wandb
 export APPTAINERENV_OMP_NUM_THREADS=8
 export APPTAINERENV_OPENBLAS_NUM_THREADS=8
 export APPTAINERENV_FASTVLA_GATHER_THREADS=8
+# Graph comparison does not require deterministic GPU kernels or a JAX upgrade.
+numerics_mode=${EXPO_NUMERICS_MODE:-default}
+case "$numerics_mode" in
+    default) variants=(baseline baseline-repeat fixed) ;;
+    lowering) variants=(baseline fixed) ;;
+    *) echo "Unknown EXPO_NUMERICS_MODE: $numerics_mode" >&2; exit 2 ;;
+esac
+printf 'mode=%s\nXLA_FLAGS=%s\n' "$numerics_mode" "${APPTAINERENV_XLA_FLAGS:-}" > "$STAGE/output/compiler-settings.txt"
 container=(apptainer exec --nv --cleanenv --containall --no-mount cwd \
   --home "$STAGE/home:/home/kevinon" --workdir "$STAGE/runtime" --pwd /opt/expo-ft \
-  --bind "$STAGE/openpi-cache:/openpi-cache,$STAGE/demo:/demo:ro,$STAGE/output:/output,$STAGE/learner_smoke.py:/opt/expo-ft/tests/gpu/learner_smoke.py:ro,$STAGE/expo_ft.py:/opt/expo-ft/expo_ft/agents/alg/expo_ft.py:ro,$STAGE/temperature.py:/opt/expo-ft/expo_ft/networks/temperature.py:ro,$STAGE/compare_profile.py:/opt/expo-ft/tests/gpu/compare_profile.py:ro" "$STAGE/learner.sif")
+  --bind "$STAGE/openpi-cache:/openpi-cache,$STAGE/demo:/demo:ro,$STAGE/output:/output,$STAGE/learner_smoke.py:/opt/expo-ft/tests/gpu/learner_smoke.py:ro,$STAGE/expo_ft.py:/opt/expo-ft/expo_ft/agents/alg/expo_ft.py:ro,$STAGE/temperature.py:/opt/expo-ft/expo_ft/networks/temperature.py:ro,$STAGE/compare_profile.py:/opt/expo-ft/tests/gpu/compare_profile.py:ro,$STAGE/compare_lowering.py:/opt/expo-ft/tests/gpu/compare_lowering.py:ro" "$STAGE/learner.sif")
 # Check CUDA before copying 12.44 GB: fail early on an unhealthy allocation.
 "${container[@]}" python -c 'import jax; import jax.numpy as j; assert len(jax.devices()) == 1; assert jax.default_backend() == "gpu"; print(jax.devices()); print((j.ones((32,32)) @ j.ones((32,32))).block_until_ready().shape)' > "$STAGE/output/gpu-preflight.txt" 2>&1
 cp -R --reflink=auto --no-preserve=mode,ownership,xattr "$cache_source/." "$STAGE/openpi-cache/"
 cp -R --no-preserve=mode,ownership,xattr /iris/u/kevinon/artifacts/expo-ft/demo/. "$STAGE/demo/"
 "${container[@]}" python docker/learner/verify_assets.py /openpi-cache > "$STAGE/output/assets-verified.txt" 2>&1
 "${container[@]}" cat /opt/expo-ft/docker/learner/requirements-installed.txt > "$STAGE/output/requirements-installed.txt"
-(while true; do nvidia-smi --query-gpu=timestamp,uuid,memory.used,utilization.gpu --format=csv,noheader; sleep 1; done) > "$STAGE/output/gpu-memory.csv" &
+(while true; do nvidia-smi --id="${CUDA_VISIBLE_DEVICES}" --query-gpu=timestamp,uuid,memory.used,utilization.gpu --format=csv,noheader; sleep 1; done) > "$STAGE/output/gpu-memory.csv" &
 monitor_pid=$!
 params=/openpi-cache/openpi-assets/checkpoints/pi05_base/params
 run_case() {
@@ -98,11 +113,35 @@ run_case() {
     cp "$STAGE/output/run-status.txt" "$RESULTS/run-status.txt"
     return "$code"
 }
-# The two processes run serially on the same GPU, with separate cold JIT caches.
-for variant in baseline fixed; do
-    cp "./${variant}_expo_ft.py" "$STAGE/expo_ft.py"
-    cp "./${variant}_temperature.py" "$STAGE/temperature.py"
-    run_case "$variant" --output "/output/$variant" --batch-size 2 --utd-ratio 1 --updates 6 --skip-checkpoint --profile-updates
+# Optional cache reuse only accelerates the reference run. The fixed run is cold.
+if [[ -n "${EXPO_BASELINE_CACHE:-}" && -d "$EXPO_BASELINE_CACHE" ]]; then
+    mkdir -p "$STAGE/output/baseline/jax-cache"
+    cp -R --reflink=auto "$EXPO_BASELINE_CACHE/." "$STAGE/output/baseline/jax-cache/"
+    printf '%s\n' "$EXPO_BASELINE_CACHE" > "$STAGE/output/baseline-cache-source.txt"
+fi
+# Every process runs serially on the same allocated GPU.
+for variant in "${variants[@]}"; do
+    source_variant=$variant
+    extra_args=()
+    if [[ "$numerics_mode" == lowering ]]; then
+        extra_args=(--lower-update-only)
+    fi
+    if [[ "$variant" == baseline-repeat ]]; then
+        source_variant=baseline
+        extra_args=(--compilation-cache /output/baseline/jax-cache)
+    fi
+    cp "./${source_variant}_expo_ft.py" "$STAGE/expo_ft.py"
+    cp "./${source_variant}_temperature.py" "$STAGE/temperature.py"
+    run_case "$variant" --output "/output/$variant" --batch-size 2 --utd-ratio 1 --updates 6 --skip-checkpoint --profile-updates "${extra_args[@]}"
 done
-"${container[@]}" python tests/gpu/compare_profile.py /output/baseline /output/fixed > "$STAGE/output/comparison.json"
+if [[ "$numerics_mode" == lowering ]]; then
+    "${container[@]}" python tests/gpu/compare_lowering.py /output/baseline /output/fixed --output /output/lowering-comparison > "$STAGE/output/comparison.json"
+    cat "$STAGE/output/comparison.json"
+    exit 0
+fi
+comparison_args=()
+if [[ "$numerics_mode" == default ]]; then
+    comparison_args=(--control /output/baseline-repeat)
+fi
+"${container[@]}" python tests/gpu/compare_profile.py /output/baseline /output/fixed "${comparison_args[@]}" > "$STAGE/output/comparison.json"
 cat "$STAGE/output/comparison.json"

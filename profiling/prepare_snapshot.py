@@ -29,6 +29,7 @@ def main():
         'fixed_temperature.py': 'expo_ft/networks/temperature.py',
         'learner_smoke.py': 'tests/gpu/learner_smoke.py',
         'compare_profile.py': 'tests/gpu/compare_profile.py',
+        'compare_lowering.py': 'tests/gpu/compare_lowering.py',
         'run_profile.sbatch': 'profiling/run_profile.sbatch',
     }.items():
         shutil.copyfile(repo / source, args.output / dest)

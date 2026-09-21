@@ -27,10 +27,13 @@ def main():
     parser.add_argument('--utd-ratio', type=int, default=1)
     parser.add_argument('--updates', type=int, default=3)
     parser.add_argument('--num-devices', type=int, default=1)
+    parser.add_argument('--backend', choices=['gpu', 'tpu'], default='gpu')
     parser.add_argument('--fsdp-devices', type=int, default=1)
     parser.add_argument('--phase', choices=['train', 'restore'], default='train')
     parser.add_argument('--skip-checkpoint', action='store_true')
     parser.add_argument('--profile-updates', action='store_true')
+    parser.add_argument('--compilation-cache', type=Path)
+    parser.add_argument('--lower-update-only', action='store_true')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.WARNING)
@@ -55,18 +58,18 @@ def main():
         row['device_memory'] = [{k:int(v) for k,v in (d.memory_stats() or {}).items()
                                  if isinstance(v, (int,np.integer))} for d in jax.devices()]
         text = json.dumps(row)
-        print('[EXPO-GPU] ' + text, flush=True)
+        print('[EXPO-LEARNER] ' + text, flush=True)
         with event_file.open('a') as stream:
             stream.write(text+'\n')
 
-    assert jax.default_backend() == 'gpu', jax.devices()
+    assert jax.default_backend() == args.backend, jax.devices()
     assert args.num_devices > 0 and args.fsdp_devices > 0
     assert len(jax.devices()) == args.num_devices, jax.devices()
     assert args.num_devices % args.fsdp_devices == 0
     assert args.batch_size % args.num_devices == 0
     cache_root = args.output if args.profile_updates else args.output.parent
-    jax.config.update('jax_compilation_cache_dir', str(cache_root/'jax-cache'))
-    report('runtime', devices=[str(d) for d in jax.devices()], jax=jax.__version__,
+    jax.config.update('jax_compilation_cache_dir', str(args.compilation_cache or cache_root/'jax-cache'))
+    report('runtime', devices=[str(d) for d in jax.devices()], backend=args.backend, jax=jax.__version__,
            batch_size=args.batch_size, utd_ratio=args.utd_ratio, updates=args.updates,
            preallocate=os.environ.get('XLA_PYTHON_CLIENT_PREALLOCATE'),
            memory_fraction=os.environ.get('XLA_PYTHON_CLIENT_MEM_FRACTION'),
@@ -192,13 +195,18 @@ def main():
         report('update_start',update=i+1,critic_batch=list(batch['actions'].shape),
                actor_batch=list(actor_batch['actions'].shape))
         if args.profile_updates:
+            report('comparison_input', update=i+1, batch_hash=fingerprint(batch),
+                   actor_batch_hash=fingerprint(actor_batch),
+                   learner_rng=np.asarray(jax.device_get(agent.rng)).tolist(),
+                   parameter_hashes=before)
             clean = agent.replace(_infer_cache=None)
             fields = {f.name: getattr(clean, f.name) for f in dataclasses.fields(clean)
                       if f.name != '_infer_cache'}
             trees = {name: str(jax.tree.structure(value)) for name, value in fields.items()}
             flat, structure = jax.tree_util.tree_flatten_with_path((clean, batch, actor_batch))
             leaves = {jax.tree_util.keystr(path): dict(aval=str(jax.core.get_aval(value)),
-                       sharding=str(getattr(value, 'sharding', None))) for path, value in flat}
+                       sharding=str(getattr(value, 'sharding', None)),
+                       committed=getattr(value, 'committed', None)) for path, value in flat}
             changed_trees = [k for k in trees if trees[k] != previous_trees.get(k)]
             changed_leaves = {k: dict(before=previous_leaves.get(k), after=v)
                               for k,v in leaves.items() if v != previous_leaves.get(k)}
@@ -210,6 +218,50 @@ def main():
                    update_cache_size=type(agent)._update_jit._cache_size())
             previous_trees, previous_leaves = trees, leaves
             del clean, fields, flat, structure
+        if args.lower_update_only:
+            # Intercept the actual update boundary, including production placement
+            # normalization, without compiling/executing the update.
+            owner = type(agent)
+            original_jit = owner._update_jit
+            def jit_fingerprint(tree):
+                digest = hashlib.sha256()
+                for leaf in jax.tree.leaves(tree):
+                    # Python scalars already enter JIT as canonical JAX dtypes
+                    # (e.g. int32 when x64 is off), before or after device_put.
+                    value = np.asarray(jax.device_get(leaf), dtype=jax.core.get_aval(leaf).dtype)
+                    assert np.isfinite(value).all()
+                    digest.update(str((value.shape, value.dtype)).encode())
+                    digest.update(value.tobytes())
+                return digest.hexdigest()
+
+            expected_payload = jit_fingerprint(agent.replace(_infer_cache=None))
+
+            class LoweringCaptured(Exception):
+                pass
+
+            def capture_lowering(call_self, call_agent, call_batch, utd_ratio, call_actor_batch=None):
+                assert jit_fingerprint(call_self) == expected_payload
+                assert jit_fingerprint(call_agent) == expected_payload
+                lowered = original_jit.lower(
+                    call_self, call_agent, call_batch, utd_ratio, call_actor_batch)
+                module = lowered.compiler_ir('stablehlo')
+                text = module.operation.get_asm(enable_debug_info=False)
+                (args.output/'update.mlir').write_text(text)
+                report('lowering_captured', payload_hash=expected_payload,
+                       raw_sha256=hashlib.sha256(text.encode()).hexdigest())
+                raise LoweringCaptured
+
+            owner._update_jit = capture_lowering
+            try:
+                agent.update(agent,batch,args.utd_ratio,actor_batch)
+            except LoweringCaptured:
+                pass
+            else:
+                raise AssertionError('The update did not use the captured JIT boundary')
+            finally:
+                owner._update_jit = original_jit
+            report('passed', lowering_only=True)
+            return
         began=time.monotonic()
         agent,info=agent.update(agent,batch,args.utd_ratio,actor_batch)
         jax.block_until_ready((agent,info))

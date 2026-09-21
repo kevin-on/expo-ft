@@ -401,7 +401,9 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
 
         target_critic = TrainState.create(
             apply_fn=critic_def.apply,
-            params=critic_params,
+            # Match the online critic's mesh metadata from the first update;
+            # changing it later invalidates the compiled update signature.
+            params=critic.params,
             tx=optax.GradientTransformation(lambda _: None, lambda _: None),
         )
 
@@ -877,8 +879,19 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
 
     def update(self, agent, batch: DatasetDict, utd_ratio: int, actor_batch: DatasetDict = None):
         # Drop stale inference copies before JIT; rebuild after so rollouts use new weights.
-        new_agent, info = self.replace(_infer_cache=None)._update_jit(
-            agent.replace(_infer_cache=None), batch, utd_ratio, actor_batch
+        update_self = self.replace(_infer_cache=None)
+        update_agent = update_self if agent is self else agent.replace(_infer_cache=None)
+        if self.data_sharding.num_devices == 1:
+            # Initialization and JIT outputs can use different array sharding /
+            # commitment metadata even on one device. Normalize the call boundary
+            # so the first executable also serves subsequent updates.
+            replicated = jax.sharding.NamedSharding(
+                self.data_sharding.mesh, jax.sharding.PartitionSpec()
+            )
+            update_self = jax.device_put(update_self, replicated)
+            update_agent = update_self if agent is self else jax.device_put(update_agent, replicated)
+        new_agent, info = update_self._update_jit(
+            update_agent, batch, utd_ratio, actor_batch
         )
         return new_agent.cache_infer_params(self._infer_cache), info
 
