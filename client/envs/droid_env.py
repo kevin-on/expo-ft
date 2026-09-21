@@ -1,4 +1,5 @@
 import time
+import logging
 
 import cv2
 import numpy as np
@@ -38,8 +39,14 @@ class DroidEnv(RobotEnv):
     ):
         robot_kwargs = {key: kwargs[key] for key in (
             "robot_server_ip", "robot_server_port", "launch_controller", "camera_serials",
-            "wrist_camera_serial", "camera_kwargs",
+            "wrist_camera_serial", "camera_kwargs", "blank_camera_serials",
         ) if key in kwargs}
+        if kwargs.get("blank_camera_serials"):
+            if (image_size is None or len(image_size) != 2
+                    or any(not isinstance(n, (int, np.integer)) or n <= 0 for n in image_size)):
+                raise ValueError("Blank cameras require image_size=(height, width) with positive integers")
+            if record_camera in kwargs["blank_camera_serials"]:
+                raise ValueError("record_camera must be a real camera, not a blank camera")
         super().__init__(
             action_space=action_space,
             gripper_action_space=gripper_action_space,
@@ -57,6 +64,10 @@ class DroidEnv(RobotEnv):
 
         self.reset_random = reset_random
         self.image_size = image_size
+        if self.blank_camera_serials:
+            logging.getLogger(__name__).warning(
+                "TEST MODE: using blank uint8 images for cameras %s", self.blank_camera_serials
+            )
         self.side_camera_id = side_camera_id
         self.wrist_camera_id = wrist_camera_id
         self.record_camera = record_camera
@@ -129,6 +140,12 @@ class DroidEnv(RobotEnv):
 
     def get_raw_observation(self):
         raw_obs = super().get_observation()
+        # TODO: Remove temporary blank-camera support once all cameras are connected.
+        for camera_id in (self.side_camera_id, self.wrist_camera_id):
+            if camera_id and camera_id.rsplit("_", 1)[0] in self.blank_camera_serials:
+                raw_obs.setdefault("image", {})[camera_id] = np.zeros(
+                    (*self.image_size, 3), dtype=np.uint8
+                )
         self.prev_obs = raw_obs
         return raw_obs
 

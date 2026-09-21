@@ -9,7 +9,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY = "https://github.com/kevin-on/droid.git"
-REVISION = "16e5fc0d3c7a9e29d2466fd3640953166a1b934a"
+REVISION = "ff940b9ac7ebca22e79c1d81cac38aac21099077"
 
 
 def install_checkout(target, source=REPOSITORY):

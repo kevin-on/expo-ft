@@ -57,7 +57,7 @@ Robot indices and their hardware mapping must remain fixed when resuming.
 
 `scripts/multi_robot/setup_droid.py` pins
 [kevin-on/droid](https://github.com/kevin-on/droid) at
-`16e5fc0d3c7a9e29d2466fd3640953166a1b934a`. This commit integrates the NUC's
+`ff940b9ac7ebca22e79c1d81cac38aac21099077`. This commit integrates the NUC's
 local changes with per-robot RPC/Polymetis routing, camera ownership and attach
 mode. No separate patch is applied.
 
@@ -160,16 +160,43 @@ client/.venv/bin/python -m unittest discover -s client/tests -p test_teleop_spac
 
 ## Cameras and rollout clients
 
-The example JSON files select the provided wrist and side serials. Robot 1's
-second wrist serial is deliberately unset. The listed three cameras include only
-one wrist; the default side+wrist policy needs a separately assigned wrist view
-for robot 1 before using that example. Its cameras are pending installation;
-fill in the actual serials when connected. This integration does not share a ZED across
-processes or invent a second wrist view. Each process opens only its listed
-camera serials. Use disjoint camera lists, including any optional recording camera.
-Camera settings are forwarded to DROID; the side-camera settings accept both
-`varied_camera` and EXPO-FT's `static_camera` alias. Missing selected cameras fail
-before a ZED wrapper is constructed.
+Robot 0 uses its real side and wrist cameras. Robot 1 temporarily uses real side
+`29838012` and a black wrist image while its wrist camera is unavailable:
+
+```json
+{
+  "camera_serials": ["29838012", "TEMP_WRIST_ROBOT_1"],
+  "blank_camera_serials": ["TEMP_WRIST_ROBOT_1"],
+  "wrist_camera_serial": "TEMP_WRIST_ROBOT_1",
+  "side_camera_id": "29838012_left",
+  "wrist_camera_id": "TEMP_WRIST_ROBOT_1_left"
+}
+```
+
+`blank_camera_serials` defaults to empty and must be a subset of explicit
+`camera_serials`. DROID excludes those serials from device opening; EXPO fills
+selected side/wrist observations with `np.zeros((height, width, 3), dtype=np.uint8)`
+using `image_size` (currently 180 × 320). Raw observations, policy inputs and
+observation videos receive those frames; no calibration is fabricated. Startup
+logs `TEST MODE` once per environment. Other camera failures remain errors.
+A blank camera cannot be the separate `record_camera`.
+
+For a test with no cameras, list both side and wrist serials in
+`blank_camera_serials`. These images are only for testing the training pipeline.
+When the wrist arrives, replace `TEMP_WRIST_ROBOT_1` in the three identity fields
+with its real serial (keeping `_left` on the observation ID) and set
+`blank_camera_serials` to `[]`.
+
+This temporary feature is included in the pinned DROID revision above and needs
+that revision in the workstation's `client/droid` checkout. NUC server code does
+not need this camera change. TODO: remove blank-camera support after all cameras
+are connected.
+
+Each process opens only its selected real camera serials. Use disjoint real
+camera lists, including any optional recording camera; a ZED is not shared across
+processes. Camera settings are forwarded to DROID; the side-camera settings
+accept both `varied_camera` and EXPO-FT's `static_camera` alias. Missing selected
+real cameras fail before a ZED wrapper is constructed.
 Both robots should use the same task/prompt and observation/action conventions;
 override robot-specific bounds and reset joints in their JSON if necessary.
 Overrides of existing NumPy array fields are converted to that field's dtype;

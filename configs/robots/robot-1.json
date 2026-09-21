@@ -1,9 +1,10 @@
 {
   "robot_server_ip": "172.16.0.1",
   "robot_server_port": 4243,
-  "camera_serials": ["29838012", "REPLACE_SECOND_WRIST_SERIAL"],
-  "wrist_camera_serial": "REPLACE_SECOND_WRIST_SERIAL",
+  "camera_serials": ["29838012", "TEMP_WRIST_ROBOT_1"],
+  "blank_camera_serials": ["TEMP_WRIST_ROBOT_1"],
+  "wrist_camera_serial": "TEMP_WRIST_ROBOT_1",
   "side_camera_id": "29838012_left",
-  "wrist_camera_id": "REPLACE_SECOND_WRIST_SERIAL_left",
+  "wrist_camera_id": "TEMP_WRIST_ROBOT_1_left",
   "spacemouse_device_path": "/dev/hidraw0"
 }
