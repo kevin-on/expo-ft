@@ -11,6 +11,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output', type=Path)
     parser.add_argument('--base', default=BASE)
+    parser.add_argument('--replicate-update-rng', action='store_true',
+                        help='Apply the common multi-device RNG compatibility fix to baseline')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     baseline = {
@@ -21,7 +23,18 @@ def main():
     commit = subprocess.check_output(['git', 'rev-parse', args.base], cwd=repo)
     originals = {name: subprocess.check_output(['git', 'show', f'{args.base}:{path}'], cwd=repo)
                  for name, path in baseline.items()}
+    if args.replicate_update_rng:
+        marker = b'    def update(self, agent, batch: DatasetDict, utd_ratio: int, actor_batch: DatasetDict = None):\n'
+        repair = (b'        from expo_ft.agents.alg.sharding_utils import place_update_rng\n'
+                  b'        self, agent = place_update_rng(self, agent)\n')
+        source = originals['baseline_expo_ft.py']
+        assert source.count(marker) == 1
+        assert marker + repair in (repo / baseline['baseline_expo_ft.py']).read_bytes()
+        originals['baseline_expo_ft.py'] = source.replace(marker, marker + repair)
     args.output.mkdir(parents=True, exist_ok=False)
+    (args.output / 'compatibility-patches.txt').write_text(
+        'baseline and fixed: RNG-only placement on training mesh\n'
+        if args.replicate_update_rng else 'baseline: unmodified\n')
     for name, contents in originals.items():
         (args.output / name).write_bytes(contents)
     for dest, source in {

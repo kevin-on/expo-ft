@@ -76,8 +76,9 @@ PY
 # Freeze both variants before editing this task's private checkout.
 base=f92c32a0d1eae3aca2282ff1787228c60b55a9be
 git cat-file -e "$base^{commit}" 2>/dev/null || git fetch --depth=1 origin "$base"
-python profiling/prepare_snapshot.py "$stage/snapshot"
-sha256sum "$stage/snapshot"/*.py > "$output/source-sha256.txt"
+python profiling/prepare_snapshot.py "$stage/snapshot" --replicate-update-rng
+cp "$stage/snapshot/compatibility-patches.txt" "$output/compatibility-patches.txt"
+sha256sum "$stage/snapshot"/*.py expo_ft/agents/alg/sharding_utils.py > "$output/source-sha256.txt"
 for variant in baseline baseline-repeat fixed; do
     source_variant=$variant
     extra_args=()

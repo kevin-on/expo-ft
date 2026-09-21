@@ -878,6 +878,8 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
 
 
     def update(self, agent, batch: DatasetDict, utd_ratio: int, actor_batch: DatasetDict = None):
+        from expo_ft.agents.alg.sharding_utils import place_update_rng
+        self, agent = place_update_rng(self, agent)
         # Drop stale inference copies before JIT; rebuild after so rollouts use new weights.
         update_self = self.replace(_infer_cache=None)
         update_agent = update_self if agent is self else agent.replace(_infer_cache=None)

@@ -43,3 +43,16 @@ Submit the pushed commit from mini's existing TPUQ installation:
   --repo git@github.com:kevin-on/expo-ft.git \
   --commit FULL_40_CHARACTER_SHA --name expo-v4-fsdp4-learner-profile
 ```
+
+## First TPU run and common compatibility repair
+
+Job `3d1e291267df` (revision `5ebf303`) loaded the model and completed inference
+on v4-8, with 37 partitioned actor arrays. The first update failed because
+`sample_actions()` left `agent.rng` committed to TPU 0 while critic state used
+all four devices. This was a device-set mismatch, not OOM.
+
+Subsequent runs apply `place_update_rng` to both baseline and fixed before their
+update implementations. It replicates only the RNG onto the training mesh,
+preserving its value and all parameter/optimizer shardings. Baseline therefore
+means f92c32a plus this disclosed common compatibility repair. The snapshot
+records this in compatibility-patches.txt. Numerical tolerances are unchanged.
