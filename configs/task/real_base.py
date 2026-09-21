@@ -19,9 +19,9 @@ def get_config():
     config.randomize_low = np.array([0.0, 0.0, 0.0, 0, 0, 0, 0])
     config.randomize_high = np.array([0.0, 0.0, 0.0, 0, 0, 0, 0])
 
-    # REPLACE with your own ZED camera serials (see README "DROID Setup").
-    config.side_camera_id = "27904255_left"
-    config.wrist_camera_id = "12841040_left"
+    # Workstation robot 0 defaults; per-robot JSON can override these views.
+    config.side_camera_id = "38651013_left"
+    config.wrist_camera_id = "15577469_left"
     
     # Observation image resize and control loop frequency.
     config.image_size = (180, 320)

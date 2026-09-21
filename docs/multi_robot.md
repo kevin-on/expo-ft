@@ -46,7 +46,7 @@ the schedule starts from that actual dispatch; there is no catch-up burst.
 
 | Robot | Workstation rollout process → learner | Workstation → NUC ZeroRPC | NUC → Franka | Polymetis arm / gripper |
 |---|---|---|---|---|
-| 0 | learner:8102 | 172.16.0.1:4242 | 172.16.0.2 | 50053 / 50054 |
+| 0 | learner:8102 | 172.16.0.1:4242 | 172.16.0.2 | 50055 / 50054 |
 | 1 | learner:8103 | 172.16.0.1:4243 | 172.16.0.3 | 50051 / 50052 |
 
 Learner ports are `client_port + robot_index`. Increase `num_robot` and add the
@@ -91,11 +91,11 @@ server per terminal from the **new** DROID checkout, after checking active
 controllers and listeners:
 
 ```bash
-python scripts/server/run_server.py --port 4242 --robot-ip 172.16.0.2 \
-  --robot-port 50053 --gripper-port 50054 \
+python -m scripts.server.run_server --port 4242 --robot-ip 172.16.0.2 \
+  --robot-port 50055 --gripper-port 50054 \
   --gripper-device /dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DA6UJOT5-if00-port0
 
-python scripts/server/run_server.py --port 4243 --robot-ip 172.16.0.3 \
+python -m scripts.server.run_server --port 4243 --robot-ip 172.16.0.3 \
   --robot-port 50051 --gripper-port 50052 \
   --gripper-device /dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DA6UJXZ9-if00-port0
 ```
@@ -107,6 +107,56 @@ environment. `launch_controller=false` in robot JSON instead attaches to
 **both** existing arm and gripper controllers at the configured ports; an arm
 listener alone is insufficient. Creating/resetting rollout environments is
 hardware operation, not a connectivity check.
+
+## SpaceMouse teleoperation without cameras
+
+From `/scr/kevinon/workspace/expo-ft-fork` on the workstation, run one command
+per terminal after `source /scr/kevinon/env.sh`:
+
+```bash
+client/.venv/bin/python -m client.teleop_spacemouse \
+  --robot-config configs/robots/robot-0.json
+
+client/.venv/bin/python -m client.teleop_spacemouse \
+  --robot-config configs/robots/robot-1.json
+```
+
+The corresponding NUC DROID server must already be running. Teleop reuses
+running arm **and** gripper controllers by default. If they are not running,
+append `--launch-controllers` to explicitly start them through that DROID server.
+A DROID listener on 4242/4243 alone does not mean those controllers are ready.
+Robot 0 uses arm port 50055 because an existing shared controller occupies 50053.
+
+Teleop reads only the server and SpaceMouse fields from the JSON; robot 1's
+missing wrist camera does not block it. It starts at the current pose without
+reset, camera access, recording, or task workspace bounds. Movement/twist controls
+the arm, button 0 closes the gripper, button 1 opens it, and release holds.
+Ctrl+C or input failure attempts a final hold command after active control.
+Translation/rotation scales default to 0.5/0.1 (normalized actions, not physical
+speed units). `--device-path`, `--device-number`, `--nuc-ip`, and `--server-port`
+can override JSON routing; a missing requested HID path fails without fallback.
+
+For the workstation's legacy `collect_data` camera classification, the ignored
+local `client/droid/droid/misc/parameters.py` uses the following nonsecret values:
+
+```python
+nuc_ip = "172.16.0.1"
+robot_ip = "172.16.0.2"
+laptop_ip = "172.16.0.10"
+robot_type = "panda"
+hand_camera_id = "15577469"
+varied_camera_1_id = "38651013"
+varied_camera_2_id = "29838012"
+```
+
+These are workstation settings; NUC credentials remain local. The task's default
+side/wrist observation IDs now match robot 0. `collect_data` still uses SpaceMouse
+index 0 and does not consume the per-robot JSON; use this teleop CLI for explicit
+robot selection. Offline checks (mocked HID/RPC):
+
+```bash
+client/.venv/bin/python -m unittest discover -s client/tests -p test_teleop_spacemouse.py
+```
 
 ## Cameras and rollout clients
 
@@ -136,7 +186,9 @@ python -m client.run_client --host LEARNER_HOST --port 8103 \
   --config-task-path configs/task/pick.py --robot-config configs/robots/robot-1.json
 ```
 
-Replace each example's `spacemouse_device_path` with that robot's actual HID path.
+The workstation mapping confirmed on 2026-09-20 is robot 0 → `/dev/hidraw2`
+and robot 1 → `/dev/hidraw0`, as configured in the JSON files. Recheck these
+paths after USB changes.
 List the paths in the workstation client environment:
 
 ```bash

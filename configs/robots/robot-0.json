@@ -5,5 +5,5 @@
   "wrist_camera_serial": "15577469",
   "side_camera_id": "38651013_left",
   "wrist_camera_id": "15577469_left",
-  "spacemouse_device_path": "REPLACE_WITH_ROBOT_0_HID_PATH"
+  "spacemouse_device_path": "/dev/hidraw2"
 }
