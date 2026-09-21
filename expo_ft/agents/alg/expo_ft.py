@@ -876,9 +876,18 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
 
 
     def update(self, agent, batch: DatasetDict, utd_ratio: int, actor_batch: DatasetDict = None):
-        # Drop stale inference copies before JIT; rebuild after so rollouts use new weights.
-        new_agent, info = self.replace(_infer_cache=None)._update_jit(
-            agent.replace(_infer_cache=None), batch, utd_ratio, actor_batch
+        # Sampling commits rng to the inference device. Restore the learner mesh
+        # before JIT so it matches the FSDP state, without changing the key value.
+        learner = self.replace(
+            rng=jax.device_put(self.rng, self.actor.replicated_sharding),
+            _infer_cache=None,
+        )
+        update_agent = learner if agent is self else agent.replace(
+            rng=jax.device_put(agent.rng, agent.actor.replicated_sharding),
+            _infer_cache=None,
+        )
+        new_agent, info = learner._update_jit(
+            update_agent, batch, utd_ratio, actor_batch
         )
         return new_agent.cache_infer_params(self._infer_cache), info
 
