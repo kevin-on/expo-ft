@@ -26,6 +26,15 @@ def compare_arrays(before, after, rtol, atol):
         reference_sq=float(np.sum(np.square(before, dtype=np.float64))))
 
 
+def warm_mean(updates, cache_events):
+    """Exclude startup calls through the last JIT executable-cache expansion."""
+    assert len(updates) == len(cache_events) and updates
+    sizes = [row['update_cache_size'] for row in cache_events]
+    last_change = max(i for i in range(len(sizes)) if i == 0 or sizes[i] != sizes[i-1])
+    warm = [row['wall_seconds'] for row in updates[last_change+1:]]
+    return statistics.mean(warm) if warm else None
+
+
 def compare(baseline, fixed, require_one_compile=True):
     runtime_before, runtime_after = [events(root, 'runtime')[0] for root in (baseline, fixed)]
     for key in ('backend', 'devices', 'jax', 'batch_size', 'utd_ratio', 'updates', 'fsdp_devices'):
@@ -87,8 +96,8 @@ def compare(baseline, fixed, require_one_compile=True):
         fixed_seconds=[r['wall_seconds'] for r in after],
         baseline_cache_sizes=[r['update_cache_size'] for r in base_cache],
         fixed_cache_sizes=[r['update_cache_size'] for r in fixed_cache],
-        baseline_warm_mean_seconds=statistics.mean(r['wall_seconds'] for r in before[3:]),
-        fixed_warm_mean_seconds=statistics.mean(r['wall_seconds'] for r in after[1:]),
+        baseline_warm_mean_seconds=warm_mean(before, base_cache),
+        fixed_warm_mean_seconds=warm_mean(after, fixed_cache),
         max_absolute_metric_error=max_metric_error, metric_differences=metric_differences,
         parameter_groups=groups, action=action,
         worst_parameter_leaves=sorted(worst_leaves, key=lambda r:r['max_abs'], reverse=True)[:10],

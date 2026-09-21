@@ -56,3 +56,35 @@ update implementations. It replicates only the RNG onto the training mesh,
 preserving its value and all parameter/optimizer shardings. Baseline therefore
 means f92c32a plus this disclosed common compatibility repair. The snapshot
 records this in compatibility-patches.txt. Numerical tolerances are unchanged.
+
+## Completed v4-8 result (2026-09-21)
+
+Job `61fe3612e72b`, task `767d9294440548f2`, ran revision
+`9902cd32ac967c34c32cded79525dcd31c0f2a22`. All three variants passed six real
+updates and post-update inference (18 total updates). Inputs, all recorded
+metrics, final trainable arrays and final actions matched exactly between
+baseline and fixed; the baseline-repeat control passed too.
+
+| Variant | Update executable counts | Warm update mean | Maximum per-chip memory |
+| --- | --- | --- | --- |
+| Baseline + RNG repair | 1,2,3,3,3,3 | 1.805 s (updates 4–6) | 19.399 GiB |
+| Baseline repeat | 1,2,3,3,3,3 | 1.829 s (updates 4–6) | 19.399 GiB |
+| Candidate + RNG repair | 1,2,2,2,2,2 | 1.886 s (updates 3–6) | 19.399 GiB |
+
+The scheduler status is **FAILED** only because the candidate requires two
+executables instead of the required one. The numerical comparison passed with
+zero observed differences. This validates robot-free FSDP-4 learning at batch 4,
+UTD 1; it does not validate the no-recompile optimization, larger batches,
+checkpoint save/restore, or robot task performance. The small warm timing sample
+is not sufficient to conclude a steady-state speed difference.
+
+The candidate's first update changes critic/optimizer array shardings, which is
+visible in its next recorded input signature; single-device normalization does
+not handle this four-device case. No additional FSDP placement optimization was
+applied. 37 actor parameter arrays were partitioned across the four devices.
+
+See `tpu-v4-results.json` for precise timings, memory and equality diagnostics.
+The original GCS comparison's fixed warm-mean field incorrectly includes update
+2's compilation; the summary uses the actual stable-cache suffix. The reporting
+code now calculates this suffix for either variant, without changing pass/fail.
+Inputs and large outputs remain in the matching US-CENTRAL2 bucket.

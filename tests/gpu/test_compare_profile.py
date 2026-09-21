@@ -53,3 +53,10 @@ def test_control_failure_fails_overall(tmp_path, monkeypatch, capsys):
     result = json.loads(capsys.readouterr().out)
     assert not result['passed']
     assert not result['baseline_repeat']['passed']
+
+
+def test_warm_mean_excludes_remaining_startup_recompile():
+    updates = [{'wall_seconds': x} for x in (130., 131., 2., 2., 2., 2.)]
+    cache = [{'update_cache_size': x} for x in (1, 2, 2, 2, 2, 2)]
+    assert comparison.warm_mean(updates, cache) == 2.0
+    assert comparison.warm_mean(updates[:2], cache[:2]) is None

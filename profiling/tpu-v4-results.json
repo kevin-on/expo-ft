@@ -1,0 +1,202 @@
+{
+  "job_id": "61fe3612e72b",
+  "task_id": "767d9294440548f2",
+  "source_commit": "9902cd32ac967c34c32cded79525dcd31c0f2a22",
+  "region": "us-central2",
+  "accelerator": "v4-8",
+  "chips": 4,
+  "fsdp_devices": 4,
+  "global_batch_size": 4,
+  "utd_ratio": 1,
+  "updates_per_variant": 6,
+  "baseline": "f92c32a plus common RNG placement repair",
+  "input_bundle": "gs://soe-iris-kevin-usc2/expo-ft/assets/validation-20260921.tar",
+  "artifacts": "gs://soe-iris-kevin-usc2/expo-ft/learner-profile/767d9294440548f2/attempt-1",
+  "scheduler_status": "FAILED",
+  "failure_reason": "Candidate used two JIT executables; comparison requires one",
+  "identical_inputs": true,
+  "strict_numerical_match": true,
+  "baseline_repeat_passed": true,
+  "no_recompilation": false,
+  "rtol": 0.0001,
+  "atol": 1e-05,
+  "max_absolute_metric_error": 0.0,
+  "parameter_groups": {
+    "actor": {
+      "exact": true,
+      "allclose": true,
+      "count": 466957072,
+      "outside_tolerance": 0,
+      "max_abs": 0.0,
+      "delta_sq": 0.0,
+      "reference_sq": 1783208.5787737502,
+      "relative_l2": 0.0
+    },
+    "critic": {
+      "exact": true,
+      "allclose": true,
+      "count": 2956490,
+      "outside_tolerance": 0,
+      "max_abs": 0.0,
+      "delta_sq": 0.0,
+      "reference_sq": 16570.864733537313,
+      "relative_l2": 0.0
+    },
+    "edit_actor": {
+      "exact": true,
+      "allclose": true,
+      "count": 324656,
+      "outside_tolerance": 0,
+      "max_abs": 0.0,
+      "delta_sq": 0.0,
+      "reference_sq": 1167.7471404100356,
+      "relative_l2": 0.0
+    },
+    "encoder": {
+      "exact": true,
+      "allclose": true,
+      "count": 34138880,
+      "outside_tolerance": 0,
+      "max_abs": 0.0,
+      "delta_sq": 0.0,
+      "reference_sq": 17020.269762133325,
+      "relative_l2": 0.0
+    },
+    "temperature": {
+      "exact": true,
+      "allclose": true,
+      "count": 1,
+      "outside_tolerance": 0,
+      "max_abs": 0.0,
+      "delta_sq": 0.0,
+      "reference_sq": 3.1595514692452976e-06,
+      "relative_l2": 0.0
+    }
+  },
+  "action": {
+    "exact": true,
+    "allclose": true,
+    "count": 112,
+    "outside_tolerance": 0,
+    "max_abs": 0.0,
+    "delta_sq": 0.0,
+    "reference_sq": 17.14658309770507,
+    "relative_l2": 0.0
+  },
+  "variants": {
+    "baseline": {
+      "passed": true,
+      "update_seconds": [
+        134.86811636899984,
+        135.38958673300112,
+        135.20053282000117,
+        1.8103787020008895,
+        1.8409649089990126,
+        1.764002805999553
+      ],
+      "jit_cache_sizes": [
+        1,
+        2,
+        3,
+        3,
+        3,
+        3
+      ],
+      "warm_update_indices": [
+        4,
+        5,
+        6
+      ],
+      "warm_mean_seconds": 1.8051154723331517,
+      "peak_gib_per_chip": [
+        19.398712635040283,
+        12.729269027709961,
+        12.729269027709961,
+        12.729269027709961
+      ],
+      "after_update_inference_seconds": 0.09022372199979145,
+      "parameter_sharding": {
+        "arrays": 71,
+        "partitioned_arrays": 37,
+        "partitioned_global_bytes": 7723401216
+      }
+    },
+    "baseline-repeat": {
+      "passed": true,
+      "update_seconds": [
+        27.70852771400132,
+        19.961462421999386,
+        19.634967841000616,
+        1.85997912700077,
+        1.8501388679997035,
+        1.7766136949994689
+      ],
+      "jit_cache_sizes": [
+        1,
+        2,
+        3,
+        3,
+        3,
+        3
+      ],
+      "warm_update_indices": [
+        4,
+        5,
+        6
+      ],
+      "warm_mean_seconds": 1.828910563333314,
+      "peak_gib_per_chip": [
+        19.398712635040283,
+        12.729269027709961,
+        12.729269027709961,
+        12.729269027709961
+      ],
+      "after_update_inference_seconds": 0.08823779300109891,
+      "parameter_sharding": {
+        "arrays": 71,
+        "partitioned_arrays": 37,
+        "partitioned_global_bytes": 7723401216
+      }
+    },
+    "fixed": {
+      "passed": true,
+      "update_seconds": [
+        130.93264543799887,
+        131.07869412499895,
+        1.8742410149989155,
+        1.821973000998696,
+        1.8968326139984129,
+        1.9492712189985468
+      ],
+      "jit_cache_sizes": [
+        1,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "warm_update_indices": [
+        3,
+        4,
+        5,
+        6
+      ],
+      "warm_mean_seconds": 1.8855794622486428,
+      "peak_gib_per_chip": [
+        19.39850616455078,
+        12.729269027709961,
+        12.729269027709961,
+        12.729269027709961
+      ],
+      "after_update_inference_seconds": 0.08862812300139922,
+      "parameter_sharding": {
+        "arrays": 71,
+        "partitioned_arrays": 37,
+        "partitioned_global_bytes": 7723401216
+      }
+    }
+  },
+  "checkpoint_save_restore_tested": false,
+  "reporting_note": "Original comparison.json assumes fixed warms after update 1 and includes its second compilation in fixed_warm_mean_seconds. This summary excludes every startup JIT-cache expansion."
+}
