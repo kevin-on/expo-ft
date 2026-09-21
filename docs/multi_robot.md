@@ -57,7 +57,7 @@ Robot indices and their hardware mapping must remain fixed when resuming.
 
 `scripts/multi_robot/setup_droid.py` pins
 [kevin-on/droid](https://github.com/kevin-on/droid) at
-`ff940b9ac7ebca22e79c1d81cac38aac21099077`. This commit integrates the NUC's
+`5f9df37cf10153868a2f05eab43d6c32a68801bc`. This commit integrates the NUC's
 local changes with per-robot RPC/Polymetis routing, camera ownership and attach
 mode. No separate patch is applied.
 
@@ -160,37 +160,27 @@ client/.venv/bin/python -m unittest discover -s client/tests -p test_teleop_spac
 
 ## Cameras and rollout clients
 
-Robot 0 uses its real side and wrist cameras. Robot 1 temporarily uses real side
-`29838012` and a black wrist image while its wrist camera is unavailable:
+Both robots now have real side and wrist cameras configured:
 
-```json
-{
-  "camera_serials": ["29838012", "TEMP_WRIST_ROBOT_1"],
-  "blank_camera_serials": ["TEMP_WRIST_ROBOT_1"],
-  "wrist_camera_serial": "TEMP_WRIST_ROBOT_1",
-  "side_camera_id": "29838012_left",
-  "wrist_camera_id": "TEMP_WRIST_ROBOT_1_left"
-}
-```
+| Robot | Side serial | Wrist serial |
+| --- | --- | --- |
+| 0 | 38651013 | 15577469 |
+| 1 | 29838012 | 12841040 |
 
-`blank_camera_serials` defaults to empty and must be a subset of explicit
-`camera_serials`. DROID excludes those serials from device opening; EXPO fills
-selected side/wrist observations with `np.zeros((height, width, 3), dtype=np.uint8)`
-using `image_size` (currently 180 × 320). Raw observations, policy inputs and
-observation videos receive those frames; no calibration is fabricated. Startup
-logs `TEST MODE` once per environment. Other camera failures remain errors.
-A blank camera cannot be the separate `record_camera`.
+Robot 1's temporary wrist placeholder was replaced and `blank_camera_serials`
+is empty. The pinned DROID camera reader requests **HD1080 / 15 FPS**.
+When neither depth nor pointcloud output is requested, it initializes the SDK
+with `DEPTH_MODE.NONE`; `depth=False` alone previously skipped only retrieval.
+Depth/pointcloud users retain the SDK depth mode, and changing those requirements
+invalidates camera initialization for the next mode selection. These camera
+changes are included in the pinned DROID revision above. Camera discovery and
+initialization are serialized across workstation processes to avoid USB probing
+collisions; frame capture still runs independently for each robot.
 
-For a test with no cameras, list both side and wrist serials in
-`blank_camera_serials`. These images are only for testing the training pipeline.
-When the wrist arrives, replace `TEMP_WRIST_ROBOT_1` in the three identity fields
-with its real serial (keeping `_left` on the observation ID) and set
-`blank_camera_serials` to `[]`.
-
-This temporary feature is included in the pinned DROID revision above and needs
-that revision in the workstation's `client/droid` checkout. NUC server code does
-not need this camera change. TODO: remove blank-camera support after all cameras
-are connected.
+The optional `blank_camera_serials` mechanism remains available for isolated
+pipeline tests, but the current real-robot launch wrapper rejects blank cameras.
+Run `scripts/multi_robot/test_camera_capture.py --help` for camera-only validation.
+No NUC camera change or learner restart is needed for these workstation settings.
 
 Each process opens only its selected real camera serials. Use disjoint real
 camera lists, including any optional recording camera; a ZED is not shared across

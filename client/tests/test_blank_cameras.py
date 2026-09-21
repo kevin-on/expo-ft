@@ -1,7 +1,5 @@
 """Exercise real DROID/EXPO observation code with mocked robot and camera I/O."""
 from contextlib import ExitStack
-import json
-from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
@@ -29,9 +27,15 @@ class BlankCameraTests(unittest.TestCase):
                            launch_controller=False)
 
     def test_real_side_and_blank_wrist_survive_observation_and_video_conversion(self):
-        root = Path(__file__).resolve().parents[2]
-        config = json.loads((root / 'configs/robots/robot-1.json').read_text())
-        config.update(image_size=(180, 320), launch_controller=False)
+        # Keep this fixture independent of the workstation's real wrist mapping.
+        config = dict(
+            robot_server_ip='172.16.0.1', robot_server_port=4243,
+            camera_serials=['29838012', 'TEMP_WRIST_ROBOT_1'],
+            blank_camera_serials=['TEMP_WRIST_ROBOT_1'],
+            wrist_camera_serial='TEMP_WRIST_ROBOT_1',
+            side_camera_id='29838012_left', wrist_camera_id='TEMP_WRIST_ROBOT_1_left',
+            image_size=(180, 320), launch_controller=False,
+        )
         side = np.full((360, 640, 3), 73, np.uint8)
         self.reader.read_cameras.return_value = ({'image': {config['side_camera_id']: side}}, {})
         env = DroidEnv(**config)
