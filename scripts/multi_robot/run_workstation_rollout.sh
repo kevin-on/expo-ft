@@ -41,5 +41,5 @@ for i in (0,1):
 print(f'Robot {robot_index}: cameras AVAILABLE; both robot mappings and SpaceMouse enumeration passed')
 PY
 exec client/.venv/bin/python -m client.run_client \
- --host iris6.stanford.edu --port "$((8102 + robot_index))" \
+ --host "${EXPO_LEARNER_HOST:-iris6.stanford.edu}" --port "$(( ${EXPO_LEARNER_BASE_PORT:-8102} + robot_index ))" \
  --config-task-path configs/task/pick.py --robot-config "configs/robots/robot-${robot_index}.json"
