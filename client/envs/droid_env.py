@@ -91,7 +91,24 @@ class DroidEnv(RobotEnv):
         self._raw_frame_buffer = []
         self._record_frame_buffer = []
         super().reset(randomize=self.reset_random)
-        return self.get_observation()
+        observation = self.get_observation()
+        # Reuse the reset observation; no extra RPC or motion command.
+        logger = logging.getLogger(__name__)
+        try:
+            actual = np.asarray(self.prev_obs["robot_state"]["joint_positions"])
+            if self.reset_random:
+                logger.info("RESET_CHECK actual_rad=%s error_unavailable=randomized_target",
+                            actual.tolist())
+            else:
+                target = np.asarray(self.reset_joints)
+                error = actual - target
+                logger.info(
+                    "RESET_CHECK target_rad=%s actual_rad=%s error_rad=%s max_abs_error_rad=%.6f",
+                    target.tolist(), actual.tolist(), error.tolist(), float(np.max(np.abs(error))),
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("RESET_CHECK joint comparison unavailable: %s", exc)
+        return observation
 
     def _before_reset(self):
         """Override in subclasses to e.g. reset detector sequence and move_up before reset."""
