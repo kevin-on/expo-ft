@@ -106,6 +106,9 @@ def collect_trajectory(
     start_recording = False
     _episode_success = None
     last_control_start = None
+    recorded_steps = 0
+    first_recorded_step_time = None
+    last_recorded_step_time = None
 
     try:
         while True:
@@ -153,6 +156,8 @@ def collect_trajectory(
                 time.sleep(sleep_left)
 
             control_timestamps["control_start"] = time_ms()
+            # Monotonic action-start time for the observation/action row we may save.
+            recorded_step_time = time.perf_counter()
             action_info = env.step(action)
             last_control_start = control_timestamps["control_start"]
 
@@ -186,6 +191,10 @@ def collect_trajectory(
 
             if traj_writer is not None and start_recording:
                 traj_writer.write_timestep(timestep)
+                recorded_steps += 1
+                if first_recorded_step_time is None:
+                    first_recorded_step_time = recorded_step_time
+                last_recorded_step_time = recorded_step_time
                 vid_size = (FLAGS.video_save_width, FLAGS.video_save_height)
                 for key in mp4_writers:
                     f = np.asarray(saved_obs[key], dtype=np.uint8)
@@ -215,6 +224,23 @@ def collect_trajectory(
                 "| total=", time_end - time_start,
             )
     finally:
+        # N recorded steps span N-1 intervals; exclude reset, idle before recording,
+        # the terminal unsaved step, and file finalization from this measurement.
+        recorded_duration_s = (
+            last_recorded_step_time - first_recorded_step_time if recorded_steps > 1 else 0.0
+        )
+        recorded_fps = (
+            (recorded_steps - 1) / recorded_duration_s if recorded_duration_s > 0 else float("nan")
+        )
+        timing_metadata = {
+            "recorded_steps": recorded_steps,
+            "recorded_duration_s": recorded_duration_s,
+            "recorded_fps": recorded_fps,
+        }
+        print(
+            f"[episode-recording] steps={recorded_steps} "
+            f"first_to_last_s={recorded_duration_s:.3f} avg_hz={recorded_fps:.3f}"
+        )
         t0 = time.perf_counter()
         # SVO recording is disabled (see start block above), so nothing to stop here.
         t_stop_rec = time.perf_counter()
@@ -228,7 +254,7 @@ def collect_trajectory(
         if _episode_success is False:
             if traj_writer is not None:
                 try:
-                    traj_writer.close()
+                    traj_writer.close(metadata=timing_metadata)
                 except Exception:
                     pass
             print("[between-episode] stop_recording={:.2f}s (failure — skipped hdf5 flush)".format(
@@ -237,7 +263,9 @@ def collect_trajectory(
             t_mp4 = time.perf_counter()
             try:
                 if traj_writer is not None:
-                    traj_writer.close(metadata=controller_info if "controller_info" in locals() else None)
+                    metadata = dict(controller_info) if "controller_info" in locals() else {}
+                    metadata.update(timing_metadata)
+                    traj_writer.close(metadata=metadata)
             except Exception as e:
                 print("Warning: traj_writer close error:", e)
             t_hdf5 = time.perf_counter()
