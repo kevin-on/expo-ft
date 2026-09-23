@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import time
@@ -11,6 +12,7 @@ from ml_collections import config_flags
 from droid.misc.time import time_ms
 
 from client.real_utils.spacemouse import SpaceMousePolicy
+from client.envs.utils import process_image_for_obs
 from droid.trajectory_utils.trajectory_writer import TrajectoryWriter
 
 FLAGS = flags.FLAGS
@@ -31,6 +33,16 @@ config_flags.DEFINE_config_file(
     "File path to the task configuration.",
     lock_config=False,
 )
+flags.DEFINE_string(
+    "robot_config",
+    None,
+    "Robot JSON overriding the task's server, camera, and SpaceMouse settings.",
+)
+flags.DEFINE_bool(
+    "save_right_images",
+    True,
+    "Also save the side and wrist right views in HDF5 and MP4 (collection only).",
+)
 flags.DEFINE_bool(
     "test_detector",
     False,
@@ -38,7 +50,22 @@ flags.DEFINE_bool(
 )
 # Saved MP4 resolution (width, height); low-res to save disk and encoding time
 flags.DEFINE_integer("video_save_width", 320, "Width of saved MP4 frames.")
-flags.DEFINE_integer("video_save_height", 240, "Height of saved MP4 frames.")
+flags.DEFINE_integer("video_save_height", 180, "Height of saved MP4 frames.")
+
+
+def collection_observation(env, raw_obs, save_right_images):
+    """Keep the policy's observation schema intact; add stereo views for storage."""
+    saved_obs = env.transform_observation(raw_obs)
+    if save_right_images:
+        for left_id, output_key in (
+            (env.side_camera_id, "exterior_image_1_right"),
+            (env.wrist_camera_id, "wrist_image_right"),
+        ):
+            right_id = left_id.rsplit("_", 1)[0] + "_right"
+            saved_obs[output_key] = process_image_for_obs(
+                raw_obs["image"][right_id], bgr_to_rgb=True, image_size=env.image_size,
+            )
+    return saved_obs
 
 
 def smallest_missing_id(dir_path: str) -> int:
@@ -91,7 +118,7 @@ def collect_trajectory(
             obs = env.get_raw_observation()
             read_camera_end = time_ms()
             t_before_transform = time_ms()
-            saved_obs = env.transform_observation(obs)
+            saved_obs = collection_observation(env, obs, FLAGS.save_right_images)
             t_after_transform = time_ms()
             done, success, _, _ = env.get_info_for_step(obs)
             t_after_obs = time_ms()
@@ -152,6 +179,7 @@ def collect_trajectory(
                         out_path = os.path.join(video_dir, f"{key}.mp4")
                         mp4_writers[key] = imageio.get_writer(
                             out_path, fps=30, format="ffmpeg", codec="libx264",
+                            macro_block_size=1,  # Keep 320x180; do not resize to a multiple of 16.
                             output_params=["-preset", "ultrafast", "-crf", "28"],
                         )
                 print("start recording (streaming traj + MP4; low memory)")
@@ -271,28 +299,46 @@ def run_and_route_one(env, controller, base_dir) -> Dict[str, object]:
 
 
 def main(_):
+    task_config = FLAGS.task_config
+    if FLAGS.robot_config:
+        with open(FLAGS.robot_config) as file:
+            robot_config = json.load(file)
+        for key, value in robot_config.items():
+            current = task_config.get(key)
+            if isinstance(current, np.ndarray):
+                value = np.asarray(value, dtype=current.dtype)
+            task_config[key] = value
+
     base_dir = FLAGS.save_root
     os.makedirs(base_dir, exist_ok=True)
 
     # use cartesian velocity and velocity for collecting data
-    FLAGS.task_config.action_space = "cartesian_velocity"
-    FLAGS.task_config.gripper_action_space = "velocity"
+    task_config.action_space = "cartesian_velocity"
+    task_config.gripper_action_space = "velocity"
     
-    env_kwargs = dict(FLAGS.task_config)
+    env_kwargs = dict(task_config)
+    camera_kwargs = {
+        key: dict(value)
+        for key, value in task_config.camera_kwargs.items()
+    }
+    if FLAGS.save_right_images:
+        for settings in camera_kwargs.values():
+            settings["left_only"] = False
+    env_kwargs["camera_kwargs"] = camera_kwargs
     # Only the HQ record camera writes during teleop collection (upstream passes no
     # video_dir here, so the per-episode raw clips stay an RL train/eval feature).
-    if FLAGS.task_config.get("record_camera"):
+    if task_config.get("record_camera"):
         env_kwargs["video_dir"] = os.path.join(base_dir, "recordings")
-    # Teleop collection saves every connected camera into the trajectory, so keep the
-    # cameras the policy doesn't read open (eval releases them; see DroidEnv).
+    # Keep configured cameras open during teleop (eval may release unused cameras).
     env_kwargs.setdefault("release_unused_cameras", False)
-    env = FLAGS.task_config.env(**env_kwargs)
+    env = task_config.env(**env_kwargs)
     # Teleop collection ends episodes on success/detector/manual/bounds only, not the step budget.
     env.ignore_auto_reset = True
-    task_config = FLAGS.task_config
     controller = SpaceMousePolicy(
         max_lin_vel=task_config.collect_max_lin_vel,
         max_rot_vel=task_config.collect_max_rot_vel,
+        device_number=task_config.get("spacemouse_device_number", 0),
+        device_path=task_config.get("spacemouse_device_path"),
     )
 
     if FLAGS.test_detector:

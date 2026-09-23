@@ -193,6 +193,32 @@ Parameters to update in `collect_data.sh`:
 - `--save_root` -- output directory for collected episodes
 - `--num_episodes` -- number of demonstrations to collect
 - `--task_config` -- task config for the robot environment
+- `--robot_config` -- optional JSON selecting the NUC port, camera pair, and SpaceMouse
+- `--save_right_images` -- defaults to true; add side/wrist right views to HDF5 and MP4. Use `--nosave_right_images` for the previous left-only collection settings.
+
+For one-at-a-time collection with the configured two-robot setup, run from the repo root
+after the selected robot is available and its NUC server is ready:
+
+```bash
+ROBOT_ID=0 bash scripts/pick/collect_data.sh
+# Or, for the other robot:
+ROBOT_ID=1 bash scripts/pick/collect_data.sh
+```
+
+The pick script defaults to 15 successful episodes and saves each robot separately under
+`data/pick_cube_balance/robot0/success/<episode>/` or `robot1/success/<episode>/`.
+Override with `NUM_EPISODES` and `SAVE_ROOT`; do not share a save root between concurrent collectors.
+Point subsequent conversion/training scripts at the selected robot's `success` directory.
+Check the camera/SpaceMouse mapping before collection; this command opens hardware and resets the robot.
+
+Each successful episode contains `traj.hdf5` and `recordings/MP4/<image_key>.mp4`.
+With stereo collection enabled, `saved_observation` in HDF5 and the MP4 directory contain
+`exterior_image_1_left`, `exterior_image_2_left` (the existing duplicate side-left view),
+`exterior_image_1_right`, `wrist_image_left`, and `wrist_image_right`.
+Images are resized to the task's `image_size` (default 320x180 pixels, width x height);
+MP4 also defaults to 320x180 without automatic macroblock resizing. These are not 1080p originals.
+Failed episodes are discarded. Stereo settings apply only to collection; adding right views
+to files does not add them to the policy's training inputs.
 
 #### Data conversion
 
