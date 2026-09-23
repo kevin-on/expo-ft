@@ -1,0 +1,25 @@
+{
+  "robot_server_ip": "172.16.0.1",
+  "robot_server_port": 4243,
+  "camera_serials": [
+    "29838012",
+    "12841040"
+  ],
+  "blank_camera_serials": [],
+  "wrist_camera_serial": "12841040",
+  "side_camera_id": "29838012_left",
+  "wrist_camera_id": "12841040_right",
+  "spacemouse_device_path": "/dev/hidraw0",
+  "camera_kwargs": {
+    "hand_camera": {
+      "image": true,
+      "depth": false,
+      "left_only": false
+    },
+    "varied_camera": {
+      "image": true,
+      "depth": false,
+      "left_only": true
+    }
+  }
+}

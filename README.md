@@ -350,6 +350,48 @@ bash scripts/pick/eval_policy.sh
 
 Parameters should match the corresponding `run_server.sh` or `run_server_async.sh` training settings.
 
+#### Evaluate the mixed two-robot SFT checkpoints
+
+Use the existing `config.pi05_weight_loader_path`, `config.pi05_assets_dir`,
+`config.pi05_asset_id`, `only_base_actions`, and `checkpoint_step=0` settings.
+The launcher sets `N=1` and disables action editing. It runs no model updates;
+existing EXPO initialization still needs one HDF5 episode for input shapes.
+
+Run one robot at a time, with the same robot ID on both hosts:
+
+```bash
+# Allocated GPU/container shell, in the prepared learner environment.
+export SFT_CHECKPOINT=/path/to/completed/run/3889
+export SFT_ASSET_ID=expo_ft/pick_mixed_100
+export EXPO_DATASET=/path/to/demo/episode-parent
+export EXPO_EVAL_OUTPUT_DIR=/path/to/eval/mixed100-step3889-robot0
+export EXPO_CLIENT_VIDEO_DIR=/scr/kevinon/data/eval/mixed100-step3889-robot0
+bash scripts/pick/eval_sft_policy.sh 0
+
+# Workstation, when ready to move the selected robot:
+export EXPO_EVAL_HOST=<reachable-compute-host-or-tunnel-endpoint>
+bash scripts/pick/run_sft_eval_client.sh 0
+```
+
+`SFT_CHECKPOINT` is a completed step directory containing `params/` and
+`assets/$SFT_ASSET_ID/norm_stats.json`; these paths must be visible in the GPU
+container. The scripts do not allocate GPUs, start a container, or set up tunnels.
+Default ports are 8202/8203; override `EXPO_EVAL_BASE_PORT` on both hosts.
+`EXPO_EVAL_EPISODES` defaults to 10, `EXPO_REPLAN_STEPS` to 8, and
+`EXPO_EVAL_SEED` to 42. `EXPO_EVAL_PYTHON` defaults to the active `python`.
+
+Eval JSONs select robot0 side **right** / wrist **left**, and robot1 side
+**left** / wrist **right**. Robot1's launcher enables `--mirror_y`: horizontally
+flip RGB and negate pose indices `[1,3,5]` before normalization; negate action
+indices `[1,3,5]` after unnormalization. Gripper values are unchanged. This uses
+the same ideal mirror assumption as dataset conversion. SpaceMouse remains in
+the physical robot frame. Existing reset and episode control flow are retained.
+
+`eval.log` on the GPU records episode success/return/length, SpaceMouse override
+step counts, and the final success rate (including intervened episodes).
+Use a fresh output directory with an existing parent. Videos are written on the
+workstation to `EXPO_CLIENT_VIDEO_DIR` and show physical views before flipping.
+
 
 ## Running Real-Time EXPO-FT
 

@@ -18,6 +18,7 @@ from expo_ft.agents import initialize_checkpoint_dir
 from expo_ft.data.replay_buffer import create_replay_buffer, _critic_key_to_storage
 from expo_ft.env.env_client import EnvClientWrapper
 from expo_ft.env.droid_utils import process_droid_dataset
+from expo_ft.env.sft_eval import canonical_observation, physical_action
 
 import openpi.training.sharding as openpi_sharding
 
@@ -54,6 +55,8 @@ flags.DEFINE_boolean("only_base_actions", False, "Use only base (OpenPI) actions
 flags.DEFINE_float("sim_latency", 0.0, "Simulated extra inference latency in ms added to each sample_actions call; 0 disables.")
 flags.DEFINE_boolean("save_video", True, "Save evaluation videos.")
 flags.DEFINE_integer("fsdp_devices", 1, "Number of FSDP devices (match training).")
+flags.DEFINE_boolean("mirror_y", False, "Mirror RGB/Cartesian pose and invert actions for the mirrored robot.")
+flags.DEFINE_string("client_video_dir", "", "Video directory on the workstation; overrides the derived path.")
 
 
 def main(_):
@@ -192,7 +195,11 @@ def main(_):
         agent = agent.cache_infer_params()
 
     video_dir = None
-    if FLAGS.save_video:
+    if FLAGS.save_video and FLAGS.client_video_dir:
+        # This path is interpreted and created by the WS client only.
+        video_dir = FLAGS.client_video_dir
+        logger.info("Saving evaluation videos on workstation: %s", video_dir)
+    elif FLAGS.save_video:
         weight_loader_path = getattr(config, "pi05_weight_loader_path", "") or ""
         if FLAGS.checkpoint_dir:
             eval_root = os.path.join(os.path.dirname(FLAGS.checkpoint_dir), "eval", f"step_{step}")
@@ -214,7 +221,7 @@ def main(_):
     eval_env_creation_request = {
         "example_action": example_action,
         "env_usage": "eval",
-        # Shared-FS path the client env writes to: arms the env-side recorders
+        # Client-local path: arms the env-side recorders
         # (HQ record_camera MP4s, and DroidEnv's raw episode videos).
         "video_dir": video_dir or "",
     }
@@ -261,6 +268,7 @@ def main(_):
         sample_info_history = []
         ep_return = 0.0
         ep_len = 0
+        ep_human_steps = 0
 
         def run_pre_cache(agent_snapshot, obs, prefix):
             compute_start = time.time()
@@ -316,6 +324,8 @@ def main(_):
 
             t_obs0 = time.time()
             observation = env.get_observation()
+            if FLAGS.mirror_y:
+                observation = canonical_observation(observation, mirror=True)
             timing["obs_ms"] = (time.time() - t_obs0) * 1000.0
             t_info0 = time.time()
             done, success, reward, _ = env.get_info_for_step()
@@ -425,7 +435,10 @@ def main(_):
 
             last_control_start = time.time()
             t_act0 = time.time()
-            env.step(np.asarray(action).tolist())
+            if FLAGS.mirror_y:
+                action = physical_action(action, mirror=True)
+            _, action_type = env.step(np.asarray(action).tolist())
+            ep_human_steps += int(action_type == "human")
             timing["act_ms"] = (time.time() - t_act0) * 1000.0
 
             timing_total_ms = (time.time() - step_t0) * 1000.0
@@ -447,7 +460,8 @@ def main(_):
         successes.append(success)
         episode_returns.append(ep_return)
         episode_lengths.append(ep_len)
-        logger.info("  success=%s return=%.1f len=%d", success, ep_return, ep_len)
+        logger.info("  success=%s return=%.1f len=%d human_override_steps=%d",
+                    success, ep_return, ep_len, ep_human_steps)
 
     n = len(successes)
     success_rate = float(np.mean(successes))
