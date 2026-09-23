@@ -7,6 +7,7 @@ camera defaults are changed only in each spawned test process, never on disk.
 """
 import argparse
 import csv
+from contextlib import nullcontext
 import json
 import multiprocessing as mp
 from pathlib import Path
@@ -25,7 +26,7 @@ def distribution(values):
             'p99': values[int(.99*(len(values)-1))], 'max': max(values)}
 
 
-def worker(index, serials, args, start, stop, messages):
+def worker(index, serials, args, start, stop, messages, init_lock):
     from concurrent.futures import ThreadPoolExecutor
     from droid.camera_utils.camera_readers import zed_camera as zed
     import pyzed.sl as sl
@@ -36,19 +37,20 @@ def worker(index, serials, args, start, stop, messages):
         if not args.use_camera_defaults:
             zed.standard_params['camera_resolution'] = sl.RESOLUTION.HD1080
             zed.standard_params['camera_fps'] = args.fps
-        cameras = zed.gather_zed_cameras(serials, wrist_camera_serial=serials[1])
-        configurations = []
-        for camera in cameras:
-            camera.set_reading_parameters(image=True, depth=False, pointcloud=False, left_only=True)
-            camera.set_trajectory_mode()
-            cfg = camera._cam.get_camera_information().camera_configuration
-            depth_mode = camera._cam.get_init_parameters().depth_mode
-            if args.expect_depth_none and depth_mode != sl.DEPTH_MODE.NONE:
-                raise RuntimeError(f'Expected depth NONE, got {depth_mode}')
-            configurations.append({'serial': camera.serial_number, 'fps': cfg.fps,
-                                   'width': cfg.resolution.width, 'height': cfg.resolution.height, 'depth_mode': str(depth_mode)})
-            if (cfg.resolution.width, cfg.resolution.height) != (1920, 1080) or abs(cfg.fps-args.fps)>.1:
-                raise RuntimeError(f'Applied camera mode differs from request: {configurations[-1]}')
+        with init_lock if args.serialize_init else nullcontext():
+            cameras = zed.gather_zed_cameras(serials, wrist_camera_serial=serials[1])
+            configurations = []
+            for camera in cameras:
+                camera.set_reading_parameters(image=True, depth=False, pointcloud=False, left_only=True)
+                camera.set_trajectory_mode()
+                cfg = camera._cam.get_camera_information().camera_configuration
+                depth_mode = camera._cam.get_init_parameters().depth_mode
+                if args.expect_depth_none and depth_mode != sl.DEPTH_MODE.NONE:
+                    raise RuntimeError(f'Expected depth NONE, got {depth_mode}')
+                configurations.append({'serial': camera.serial_number, 'fps': cfg.fps,
+                                       'width': cfg.resolution.width, 'height': cfg.resolution.height, 'depth_mode': str(depth_mode)})
+                if (cfg.resolution.width, cfg.resolution.height) != (1920, 1080) or abs(cfg.fps-args.fps)>.1:
+                    raise RuntimeError(f'Applied camera mode differs from request: {configurations[-1]}')
         result['configurations'] = configurations
         messages.put({'event': 'ready', 'pair': index, 'configurations': configurations})
         while not start.wait(.2):
@@ -147,6 +149,7 @@ def worker(index, serials, args, start, stop, messages):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pair',nargs=2,action='append',required=True,metavar=('SIDE_SERIAL','WRIST_SERIAL'))
+    parser.add_argument('--serialize-init',action='store_true',help='Serialize SDK discovery/open across workers; capture remains concurrent')
     parser.add_argument('--fps',type=int,choices=[15,30],default=15)
     parser.add_argument('--use-camera-defaults',action='store_true',help='Validate production resolution/FPS without overriding them')
     parser.add_argument('--expect-depth-none',action='store_true',help='Fail if SDK depth computation is enabled')
@@ -164,7 +167,8 @@ def main():
     context=mp.get_context('spawn')
     start,stop=context.Event(),context.Event()
     messages=context.Queue()
-    workers=[context.Process(target=worker,args=(i,pair,args,start,stop,messages)) for i,pair in enumerate(args.pair)]
+    init_lock=context.Lock()
+    workers=[context.Process(target=worker,args=(i,pair,args,start,stop,messages,init_lock)) for i,pair in enumerate(args.pair)]
     ready=set(); finished=set(); began=time.monotonic(); measuring=None; resource_at=0
     def cpu_counters():
         fields=[int(v) for v in Path('/proc/stat').read_text().splitlines()[0].split()[1:9]]
