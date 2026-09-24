@@ -11,13 +11,18 @@ import dataclasses
 import logging
 import json
 import os
+import select
 import socket
+import termios
+import threading
 import time
+import tty
 from typing import Dict, Any, Optional
 
 import numpy as np
 import websockets
 import websockets.asyncio.client as _client
+from websockets.protocol import State
 from openpi_client import msgpack_numpy
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -74,6 +79,7 @@ class Args:
 
 
 _env_storage: Dict[str, Any] = {}
+_eval_env_ids: set[str] = set()
 _config_task_path: Optional[str] = None
 _task_config: Optional[Any] = None
 _robot_config: dict = {}
@@ -87,6 +93,102 @@ _step_timing_threshold_ms: float = 30.0
 # Human-in-the-loop: lazy spacemouse for droid envs
 _spacemouse_policy: Optional[Any] = None
 _HUMAN_OVERRIDE_NORM_THRESHOLD = 1e-4
+
+
+class _ResetPause:
+    """Read Space only during reset; leave robot RPCs on their original thread."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._paused = False
+        self._resetting = True
+        self._error = None
+        self._fd = None
+        self._attrs = None
+        self._thread = None
+        self._logger = logging.getLogger(__name__)
+
+    def __enter__(self):
+        try:
+            self._fd = os.open("/dev/tty", os.O_RDONLY | os.O_NONBLOCK)
+            self._attrs = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd, termios.TCSANOW)
+            # Keys entered during rollout must not pause a later reset.
+            termios.tcflush(self._fd, termios.TCIFLUSH)
+        except (OSError, termios.error) as exc:
+            self.__exit__(None, None, None)
+            self._logger.warning("[RESET] Space unavailable: %s", exc)
+        self._logger.info("[RESET_START]")
+        if self._fd is not None:
+            self._thread = threading.Thread(target=self._read_keys, daemon=True)
+            self._thread.start()
+        return self
+
+    def _read_keys(self):
+        try:
+            while not self._stop.is_set():
+                ready, _, _ = select.select([self._fd], [], [], 0.05)
+                if not ready:
+                    continue
+                try:
+                    keys = os.read(self._fd, 1024)
+                except BlockingIOError:
+                    continue
+                if not keys:
+                    raise OSError("TTY closed")
+                for key in keys:
+                    if key == ord(" "):
+                        with self._lock:
+                            if self._stop.is_set():
+                                return
+                            self._paused = not self._paused
+                            self._logger.info(
+                                "[%s] %s", "PAUSE" if self._paused else "RESUME",
+                                "resetting" if self._resetting else "ready",
+                            )
+        except (OSError, ValueError) as exc:
+            with self._lock:
+                self._error = exc
+
+    def reset_done(self):
+        with self._lock:
+            self._resetting = False
+            self._logger.info("[RESET_DONE] %s", "paused" if self._paused else "ready")
+
+    def finish_if_ready(self):
+        with self._lock:
+            if self._error is not None:
+                raise RuntimeError("Reset pause input failed") from self._error
+            if self._paused:
+                return False
+            self._stop.set()
+            return True
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        if self._fd is not None:
+            try:
+                if self._attrs is not None:
+                    termios.tcsetattr(self._fd, termios.TCSANOW, self._attrs)
+                    termios.tcflush(self._fd, termios.TCIFLUSH)
+            finally:
+                os.close(self._fd)
+                self._fd = None
+
+
+async def _reset_with_pause(env, websocket):
+    with _ResetPause() as pause:
+        obs = env.reset()
+        pause.reset_done()
+        while not pause.finish_if_ready():
+            if websocket.state is State.CLOSED:
+                raise ConnectionError("Connection closed during reset pause")
+            # Yield so websocket keepalive/close handling continues while paused.
+            await asyncio.sleep(0.05)
+        return obs
 
 
 def _get_human_override_action(task_config: Optional[Any] = None) -> tuple:
@@ -151,6 +253,8 @@ async def _handle_environment_request(websocket):
                     env_kwargs["env_usage"] = env_usage
                     env = task_config.env(**env_kwargs)
                     _env_storage[env_id] = env
+                    if env_usage == "eval" and task_config.env_type == "droid":
+                        _eval_env_ids.add(env_id)
                     logger.info(f"Environment {env_id} created successfully")
                     
                     task_description = task_config.language_instruction
@@ -165,7 +269,10 @@ async def _handle_environment_request(websocket):
                     if env is None:
                         response = {"status": "error", "message": f"Environment {env_id} not found"}
                     else:
-                        obs = env.reset()
+                        if env_id in _eval_env_ids:
+                            obs = await _reset_with_pause(env, websocket)
+                        else:
+                            obs = env.reset()
                         response = {
                             "status": "success",
                             "observation": obs,
@@ -312,6 +419,7 @@ async def _handle_environment_request(websocket):
         for env in _env_storage.values():
             env.close()
         _env_storage.clear()
+        _eval_env_ids.clear()
 
 
 async def _run_client(
