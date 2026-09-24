@@ -62,7 +62,7 @@ flags.DEFINE_integer("fsdp_devices", 1, "Number of FSDP devices for sharding.")
 
 flags.DEFINE_string("client_host", "0.0.0.0", "Bind host to listen on; the rollout client dials in.")
 flags.DEFINE_integer("client_port", 8102, "Bind port to listen on.")
-flags.DEFINE_integer("num_robot", 1, "Robots per synchronous round; clients dial client_port + robot index.")
+flags.DEFINE_integer("num_robot", 1, "Robots per synchronous round; 2 uses the robot1 mirror setup. Clients dial client_port + robot index.")
 
 flags.DEFINE_integer("replan_steps", 8, "Number of replan steps for evaluation.")
 flags.DEFINE_integer(
@@ -73,7 +73,7 @@ flags.DEFINE_integer(
 )
 flags.DEFINE_float("sim_latency", 0.0, "Simulated extra inference latency in ms added to each sample_actions call; 0 disables.")
 
-flags.DEFINE_string("dataset_path", "", "Path to the dataset.")
+flags.DEFINE_string("dataset_path", "", "Path to preprocessed HDF5 demonstration episodes.")
 config_flags.DEFINE_config_file(
     "config",
     "configs/model/expo_ft_pi_config.py",
@@ -101,6 +101,9 @@ def main(_):
             raise ValueError("Require num_updates >= 0, step_interval >= 1 and replan_steps >= 1")
         if FLAGS.resume and not FLAGS.checkpoint_buffer:
             raise ValueError("Multi-robot resume requires checkpoint_buffer and saved robot replay records")
+    if FLAGS.num_robot == 2:
+        if (FLAGS.config_task.action_space, FLAGS.config_task.gripper_action_space) != ("cartesian_velocity", "velocity"):
+            raise ValueError("Two-robot mirror setup requires Cartesian velocity + gripper velocity")
     assert FLAGS.offline_ratio >= 0.0 and FLAGS.offline_ratio <= 1.0
 
     if FLAGS.batch_size % jax.device_count() != 0:
@@ -251,7 +254,8 @@ def main(_):
     if multi_robot:
         from expo_ft.utils.multi_robot_training import train_multi_robot
         train_multi_robot(FLAGS, agent, replay_buffers, batch_processor, checkpoint_manager,
-                          checkpoint_dir, train_video_dir, save_checkpoint, start_step, resuming, replicated_sharding)
+                          checkpoint_dir, train_video_dir, save_checkpoint, start_step, resuming, replicated_sharding,
+                          mirror_robot=1 if FLAGS.num_robot == 2 else None)
         return
 
     # The env is created only now: EnvClientWrapper blocks until the rollout client

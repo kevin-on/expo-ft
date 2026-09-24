@@ -35,3 +35,10 @@ def physical_action(action, mirror):
     if mirror:
         result[[1, 3, 5]] *= -1
     return result
+
+
+def validate_camera_views(task_config, expected_views):
+    """Check the selected eyes before constructing a physical robot environment."""
+    for key, expected in expected_views.items():
+        if task_config.get(key) != expected:
+            raise ValueError(f"Mirror training requires {key}={expected!r}; got {task_config.get(key)!r}")

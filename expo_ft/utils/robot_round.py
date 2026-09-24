@@ -8,8 +8,10 @@ import time
 
 import numpy as np
 
+from expo_ft.env.sft_eval import canonical_observation, physical_action
 
-def collect_round(envs, sample_actions, replan_steps, control_hz):
+
+def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=None):
     """Return episodes in robot order. No reset or inference survives this barrier.
 
     Workers perform RPCs concurrently and submit inference requests to one queue.
@@ -19,8 +21,12 @@ def collect_round(envs, sample_actions, replan_steps, control_hz):
     requests = queue.Queue()
     stopped = threading.Event()
 
-    def collect(env):
+    def collect(index, env):
+        canonical = mirror_robot is not None
+        mirror = index == mirror_robot
         observation = env.reset()
+        if canonical:
+            observation = canonical_observation(observation, mirror)
         plan = deque()
         transitions = []
         action_type = "policy"
@@ -43,10 +49,18 @@ def collect_round(envs, sample_actions, replan_steps, control_hz):
             # zero command. Resume inference after a step returns policy control.
             command = plan.popleft() if plan else np.zeros_like(action)
             last_dispatch = time.monotonic()
+            if canonical:
+                command = physical_action(command, mirror)
             action, action_type = env.step(command)
+            if canonical:
+                # Reflection is its own inverse. Store the executed action,
+                # including workspace clipping and human overrides, in the model frame.
+                action = physical_action(action, mirror)
             if action_type == "human":
                 plan.clear()
             next_observation = env.get_observation()
+            if canonical:
+                next_observation = canonical_observation(next_observation, mirror)
             done, success, reward, mask = env.get_info_for_step()
             transitions.append(dict(
                 observations=observation, actions=action, rewards=reward,
@@ -57,7 +71,7 @@ def collect_round(envs, sample_actions, replan_steps, control_hz):
                 return transitions, success
 
     with ThreadPoolExecutor(max_workers=len(envs)) as workers:
-        episodes = [workers.submit(collect, env) for env in envs]
+        episodes = [workers.submit(collect, index, env) for index, env in enumerate(envs)]
         try:
             while not all(episode.done() for episode in episodes):
                 for episode in episodes:

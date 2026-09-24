@@ -63,3 +63,50 @@ def test_training_driver_barrier_warmup_and_new_policy(monkeypatch, tmp_path, ma
     with pytest.raises(ValueError, match="incomplete robot replay"):
         training.train_multi_robot(flags, agent, [make_buffer(1), make_buffer(2)], processor, manager,
                                    tmp_path, tmp_path / "video", lambda *_: None, 56, True, None)
+
+
+def test_mirror_contract_camera_request_and_resume(monkeypatch, tmp_path, make_buffer):
+    """The driver persists the same convention that it passes to the collector."""
+    import json
+    from pathlib import Path
+    from conftest import transition
+
+    requests, saved, collected = [], [], []
+    def create_env(**kwargs):
+        requests.append(kwargs['env_creation_request'])
+        return FakeEnv(1)
+    monkeypatch.setattr(training, 'EnvClientWrapper', create_env)
+    monkeypatch.setattr(training.wandb, 'log', lambda *args, **kwargs: None)
+    def collect(envs, sample, replan_steps, control_hz, mirror_robot=None):
+        collected.append(mirror_robot)
+        return [([transition(i, 0, done=True, success=True)], True) for i in range(2)]
+    monkeypatch.setattr(training, 'collect_round', collect)
+    flags = SimpleNamespace(seed=1, max_steps=2, replan_steps=2, client_host='localhost', client_port=8102,
+                            config_task=SimpleNamespace(example_action=np.zeros(2), control_hz=10),
+                            num_updates=3, step_interval=8, batch_size=4, utd_ratio=1,
+                            checkpoint_buffer=True, checkpoint_model=True, checkpoint_interval=0)
+    manager = SimpleNamespace(wait_until_finished=lambda: None)
+    def run(mirror_robot, resuming):
+        buffers = [make_buffer(1), make_buffer(2)]
+        training.train_multi_robot(flags, object(), buffers, None, manager, tmp_path, tmp_path / 'video',
+                                   lambda *args: saved.append(args[-1]), 2 if resuming else 0,
+                                   resuming, None, mirror_robot=mirror_robot)
+        return buffers
+    run(1, False)
+    assert collected == [1] and saved == [2]
+    for i, request in enumerate(requests):
+        cfg = json.loads((Path(__file__).resolve().parents[2] / f'configs/robots/robot-{i}-sft-eval.json').read_text())
+        assert request['expected_camera_views'] == {key: cfg[key] for key in ('side_camera_id', 'wrist_camera_id')}
+    ledger = json.loads((tmp_path/'round-2.json').read_text())
+    assert ledger['mirror_robot'] == 1
+    restored = run(1, True)
+    assert [len(buffer) for buffer in restored] == [1, 1]
+    requests.clear()
+    for incompatible in (None, 0):
+        with pytest.raises(ValueError, match='same live robot mirror convention'):
+            run(incompatible, True)
+    assert not requests  # reject before creating any live environment
+    ledger.pop('mirror_robot')
+    (tmp_path/'round-2.json').write_text(json.dumps(ledger))
+    with pytest.raises(ValueError, match='same live robot mirror convention'):
+        run(1, True)

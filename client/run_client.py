@@ -241,6 +241,9 @@ async def _handle_environment_request(websocket):
                         if isinstance(current, np.ndarray):
                             value = np.asarray(value, dtype=current.dtype)
                         task_config[key] = value
+                    if request.get("expected_camera_views"):
+                        from expo_ft.env.sft_eval import validate_camera_views
+                        validate_camera_views(task_config, request["expected_camera_views"])
                     _task_config = task_config
                     env_name = task_config.env_name
                     env_usage = request["env_usage"]

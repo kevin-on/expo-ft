@@ -275,3 +275,51 @@ model weights are replaced in this harness; this is not a VLA training test.
 GPU model compilation/update, ZED/HID ownership, Polymetis controller launches,
 real-time scheduling of two arms on one NUC, and physical task behavior require
 the target machines and hardware.
+
+## Online finetuning from the mirrored two-robot SFT datasets
+
+`--num_robot=2` automatically uses the live robot1-to-robot0 mirror convention: robot0 side right/wrist left, robot1 side
+left/wrist right. Both robots remain physically controlled and reset in their
+own base frames. Use the intended SFT checkpoint and its normalization assets.
+
+Offline demonstrations are ordinary HDF5 episodes supplied through
+`--dataset_path`. They must already use the policy's image views and coordinate
+convention. The loader does not select camera eyes, mirror offline data, or read
+SFT manifests. Existing `--num_data` and offline sampling settings still apply.
+
+To export an already-preprocessed LeRobot v2.1 dataset with embedded RGB images:
+
+```bash
+python scripts/convert_lerobot_to_hdf5.py \
+  --dataset /path/to/lerobot/dataset --output /path/to/hdf5/dataset
+# Then pass --dataset_path=/path/to/hdf5/dataset to the learner.
+```
+
+The exporter preserves episode/frame order and decoded image/state/action values,
+without applying mirror, resize, or normalization. It verifies each written
+HDF5 against the source. Outputs are `<episode_index>/traj.hdf5`; existing output
+directories are refused. The learner does not need the export metadata.
+
+Start each WS client with the two-robot launcher, for example:
+
+```bash
+EXPO_LEARNER_HOST=127.0.0.1 \
+  bash scripts/multi_robot/run_workstation_rollout.sh 0
+# Run the same command with 1 for the second robot.
+```
+
+The launcher reuses `robot-{0,1}-sft-eval.json`. The learner checks the selected
+camera IDs through the client before constructing the hardware environment.
+Robot1 observations are reflected before inference; policy actions are reflected
+back before execution; returned executed actions (including physical clipping and
+SpaceMouse overrides) are reflected into the common frame for replay. Reward,
+termination, workspace bounds, reset, update counts and learning objectives are
+unchanged. Both actor and critic consume the same canonical replay.
+
+The round checkpoint records which live robot is mirrored. Resuming with a
+different convention, or enabling mirror mode on old physical-frame replay,
+is rejected. There is no separate mirror switch for this two-robot setup.
+`num_robot=1` retains its existing behavior. The core round loop accepts more
+than two robots without this automatic mirror convention, but additional client
+configurations and launchers must be supplied; the workstation launcher here
+only configures robots 0 and 1.

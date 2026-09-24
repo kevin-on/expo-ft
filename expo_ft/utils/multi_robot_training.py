@@ -13,14 +13,23 @@ from expo_ft.utils.robot_round import collect_round, updates_for_round
 
 
 def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager,
-                      checkpoint_dir, video_dir, save_checkpoint, start_step, resuming, replicated_sharding):
+                      checkpoint_dir, video_dir, save_checkpoint, start_step, resuming, replicated_sharding,
+                      mirror_robot=None):
     checkpoint_dir = Path(checkpoint_dir)
+    camera_views = [{} for _ in buffers]
+    if mirror_robot is not None:
+        for index in range(len(buffers)):
+            path = Path(__file__).resolve().parents[2] / f"configs/robots/robot-{index}-sft-eval.json"
+            config = json.loads(path.read_text())
+            camera_views[index] = {key: config[key] for key in ("side_camera_id", "wrist_camera_id")}
     step, episode_count, pending_steps = start_step, 0, 0
     combine_rng = jax.random.PRNGKey(flags.seed + 100)
     if resuming:
         state = json.loads((checkpoint_dir / f"round-{step}.json").read_text())
         if state["num_robot"] != len(buffers):
             raise ValueError("Resume requires the same ordered robot configuration")
+        if state.get("mirror_robot") != mirror_robot:
+            raise ValueError("Resume requires the same live robot mirror convention")
         episode_count, pending_steps = state["episode_count"], state["pending_steps"]
         combine_rng = np.asarray(state["combine_rng"], dtype=np.uint32)
         records = list(checkpoint_dir.glob("robot-*/buffers/*.pkl"))
@@ -39,6 +48,7 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
         env_creation_request={
             "example_action": flags.config_task.example_action,
             "env_usage": "train", "video_dir": str(Path(video_dir) / f"robot-{index}"),
+            "expected_camera_views": camera_views[index],
         }, host=flags.client_host, port=flags.client_port + index,
         recover=False, lazy=True,
     ) for index in range(len(buffers))]
@@ -52,14 +62,16 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
         # The round ledger and all replay records are written before publishing
         # the model checkpoint, so a restored policy always has a full barrier.
         state = dict(num_robot=len(buffers), episode_count=episode_count,
-                     pending_steps=pending_steps, combine_rng=np.asarray(combine_rng).tolist())
+                     pending_steps=pending_steps, combine_rng=np.asarray(combine_rng).tolist(),
+                     mirror_robot=mirror_robot)
         (checkpoint_dir / f"round-{step}.json").write_text(json.dumps(state))
         save_checkpoint(checkpoint_manager, agent, step)
 
     last_checkpoint = start_step
     try:
         while step < flags.max_steps:
-            episodes = collect_round(envs, sample_actions, flags.replan_steps, flags.config_task.control_hz)
+            episodes = collect_round(envs, sample_actions, flags.replan_steps, flags.config_task.control_hz,
+                                     mirror_robot=mirror_robot)
             round_steps = sum(len(transitions) for transitions, _ in episodes)
             metrics = {}
             for index, (buffer, (transitions, success)) in enumerate(zip(buffers, episodes)):
