@@ -84,9 +84,12 @@ class SFTEvalTests(unittest.TestCase):
         main.body = main.body[start:]
         loop_code = compile(ast.fix_missing_locations(ast.Module(body=[main], type_ignores=[])),
                             "eval_droid_policy.py:rollout", "exec")
-        for mirror in (False, True):
-            max_steps, end_after = 4, 2
-            with self.subTest(mirror=mirror):
+        # Early success, timeout failure, and success on the last allowed action.
+        cases = [(mirror, end_after, terminal_success) for mirror in (False, True)
+                 for end_after, terminal_success in ((2, True), (4, False), (4, True))]
+        for mirror, end_after, terminal_success in cases:
+            max_steps = 4
+            with self.subTest(mirror=mirror, end_after=end_after, success=terminal_success):
                 sample = example_step()
                 obs = dict(sample["saved_observation"], wrist_image_left=sample["saved_observation"]["wrist_image_right"])
                 expected = prepare_step_for_sft(sample, True)
@@ -95,8 +98,14 @@ class SFTEvalTests(unittest.TestCase):
                 sent = []
                 env.reset.return_value = obs
                 env.get_observation.return_value = obs
-                env.get_info_for_step.side_effect = lambda: (len(sent) >= end_after, len(sent) >= end_after,
-                                                             float(len(sent) >= end_after), 1.)
+                terminal_checks = []
+                def get_info():
+                    done = len(sent) >= end_after
+                    success = done and terminal_success
+                    if done:
+                        terminal_checks.append(len(sent))
+                    return done, success, float(success), 1.
+                env.get_info_for_step.side_effect = get_info
                 def step(action):
                     sent.append(action)
                     return np.asarray(action), "human" if len(sent) == 1 else "policy"
@@ -122,8 +131,11 @@ class SFTEvalTests(unittest.TestCase):
                 exec(loop_code, namespace)
                 namespace["run_eval_loop"](agent)
                 self.assertEqual(env.reset.call_count, 1)
-                self.assertEqual(len(sent), 2)
-                self.assertEqual(len(received), 3)  # preserve the original loop ordering
+                self.assertEqual(len(sent), end_after)
+                self.assertEqual(len(received), min(end_after + 1, max_steps))
+                self.assertEqual(env.get_observation.call_count, end_after + 1)
+                self.assertEqual(env.get_info_for_step.call_count, end_after + 1)
+                self.assertEqual(terminal_checks, [end_after])
                 for prediction_input in received:
                     expected_obs = expected["saved_observation"] if mirror else obs
                     for key, value in expected_obs.items():
@@ -132,7 +144,8 @@ class SFTEvalTests(unittest.TestCase):
                     expected_action = np.r_[sample["action"]["cartesian_velocity"], -1] if mirror else policy_action
                     np.testing.assert_allclose(action, expected_action)
                 logger.info.assert_any_call("  success=%s return=%.1f len=%d human_override_steps=%d",
-                                            True, 1., 3, 1)
+                                            terminal_success, float(terminal_success),
+                                            min(end_after + 1, max_steps), 1)
 
     def test_no_heavy_or_hardware_imports(self):
         for name in ("jax", "torch", "pyzed", "droid", "pyspacemouse", "lerobot"):

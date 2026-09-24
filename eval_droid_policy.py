@@ -455,6 +455,12 @@ def main(_):
                 done,
             )
 
+        else:
+            # Refresh the final action's outcome so the WS saves timeout videos.
+            env.get_observation()
+            done, success, reward, _ = env.get_info_for_step()
+            ep_return += reward
+
         pending_inference = clear_pending(pending_inference)
 
         successes.append(success)
