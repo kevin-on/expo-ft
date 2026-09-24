@@ -1,4 +1,4 @@
-r"""Build five balanced LeRobot datasets from two robots' successful demonstrations.
+r"""Build matching LeRobot and online-FT HDF5 datasets from two robots' demos.
 
 Keep the original converter unchanged; reuse its HDF5 reader, image resizing,
 action assembly, task configuration loader, and LeRobot feature conventions.
@@ -15,6 +15,8 @@ Example (in the existing SFT/LeRobot environment, from the repository root):
         --repo-prefix expo_ft/pick_mixed --seed 42
 
 Outputs <repo-prefix>_20, _40, _60, _80, _100 under HF_LEROBOT_HOME.
+The same final frames are also saved to <hdf5-root>/<repo-name>/<episode>/traj.hdf5.
+--hdf5-root defaults to HF_LEROBOT_HOME/hdf5. No second mirror/resize is applied.
 The physical right-hand robot is not inferred from its ID: set --mirror-robot.
 Existing output directories are refused. Raw HDF5 files are never modified.
 Normalization and SFT are separate steps; neither is launched here.
@@ -139,7 +141,21 @@ def prepare_step_for_sft(step, mirror):
     }
 
 
-def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_prefix, seed):
+def save_final_episode(frames, path, episode_index, fps):
+    """Write the exact final frames passed to LeRobot in the online loader schema."""
+    from scripts.convert_lerobot_to_hdf5 import IMAGE_KEYS, write_verified_episode
+
+    arrays = {f"saved_observation/{key}": np.stack([frame[key] for frame in frames])
+              for key in (*IMAGE_KEYS, "cartesian_position")}
+    arrays["saved_observation/gripper_position"] = np.stack(
+        [frame["gripper_position"] for frame in frames]).reshape(len(frames))
+    actions = np.stack([frame["actions"] for frame in frames])
+    arrays["action/cartesian_velocity"] = actions[:, :6]
+    arrays["action/gripper_velocity"] = actions[:, 6]
+    write_verified_episode(path, arrays, episode_index, fps)
+
+
+def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_prefix, seed, hdf5_root=None):
     if mirror_robot not in (0, 1):
         raise ValueError("mirror_robot must be 0 or 1")
     prefix = Path(repo_prefix)
@@ -167,14 +183,19 @@ def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_prefix, seed):
     action_key = task_cfg.action_space
     gripper_key = f"gripper_{task_cfg.gripper_action_space}"
     action_dim = 7
+    hdf5_root = Path(hdf5_root) if hdf5_root is not None else original.HF_LEROBOT_HOME / "hdf5"
     repo_names = [f"{repo_prefix}_{2 * count}" for count in EPISODES_PER_ROBOT]
     for repo_name in repo_names:
-        output_path = original.HF_LEROBOT_HOME / repo_name
-        if output_path.exists():
-            raise FileExistsError(f"Output already exists; choose a new --repo-prefix: {output_path}")
+        for output_path in (original.HF_LEROBOT_HOME / repo_name, hdf5_root / repo_name):
+            if output_path.exists():
+                raise FileExistsError(f"Output already exists; choose a new --repo-prefix: {output_path}")
+        if (original.HF_LEROBOT_HOME / repo_name).resolve() == (hdf5_root / repo_name).resolve():
+            raise ValueError("LeRobot and HDF5 output directories must be different")
 
     for count, repo_name in zip(EPISODES_PER_ROBOT, repo_names):
         episode_paths = mixed_episodes(pools, count)
+        hdf5_path = hdf5_root / repo_name
+        hdf5_path.mkdir(parents=True, exist_ok=False)
         print(f"Creating {repo_name}: {count} episodes per robot, fps={fps}")
         # Same Cartesian-state feature schema and writer options as the original converter.
         dataset = original.LeRobotDataset.create(
@@ -231,10 +252,11 @@ def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_prefix, seed):
                 trajectory = original.load_trajectory(str(episode_path), read_cameras=False)
                 if len(trajectory) != lengths[episode_path]:
                     raise ValueError(f"Episode changed since validation: {episode_path}")
+                final_frames = []
                 for step in trajectory:
                     step = prepare_step_for_sft(step, mirror=(robot_id == mirror_robot))
                     # Same image/state/action assembly as the original Cartesian converter.
-                    dataset.add_frame({
+                    frame = {
                         "exterior_image_1_left": original.resize_image(
                             step["saved_observation"]["exterior_image_1_left"], (320, 180)),
                         "exterior_image_2_left": original.resize_image(
@@ -247,8 +269,13 @@ def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_prefix, seed):
                             step["saved_observation"]["gripper_position"][None], dtype=np.float32),
                         "actions": original._action_from_step(step["action"], action_key, gripper_key),
                         "task": language_instruction,
-                    })
+                    }
+                    final_frames.append(frame)
+                    # LeRobot may add/pop dictionary keys while buffering the frame.
+                    dataset.add_frame(frame.copy())
                 dataset.save_episode()
+                save_final_episode(final_frames, hdf5_path / str(episode_index) / "traj.hdf5",
+                                   episode_index, fps)
                 manifest["episodes"].append({
                     "episode_index": episode_index,
                     "robot_id": robot_id,
@@ -259,6 +286,7 @@ def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_prefix, seed):
             manifest_path = original.HF_LEROBOT_HOME / repo_name / "meta" / "source_episodes.json"
             manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
             print(f"Saved {repo_name}; source episode manifest: {manifest_path}")
+            print(f"Online FT HDF5 episodes: {hdf5_path}")
         finally:
             dataset.stop_image_writer()
 
@@ -272,4 +300,6 @@ if __name__ == "__main__":
     parser.add_argument("--task-config", default="configs/task/pick.py")
     parser.add_argument("--repo-prefix", default="expo_ft/pick_mixed")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--hdf5-root", type=Path, default=None,
+                        help="Online FT HDF5 output root (default: HF_LEROBOT_HOME/hdf5)")
     main(**vars(parser.parse_args()))

@@ -287,6 +287,11 @@ Offline demonstrations are ordinary HDF5 episodes supplied through
 convention. The loader does not select camera eyes, mirror offline data, or read
 SFT manifests. Existing `--num_data` and offline sampling settings still apply.
 
+`scripts/convert_two_robot_data_to_lerobot.py` writes both formats from the same
+final frames. Its HDF5 output is `<HF_LEROBOT_HOME>/hdf5/<repo-name>/<episode>/traj.hdf5`
+by default; use `--hdf5-root` to choose another root. No separate export is needed
+for new datasets. Episode selection, camera views, reflection and resize are shared.
+
 To export an already-preprocessed LeRobot v2.1 dataset with embedded RGB images:
 
 ```bash

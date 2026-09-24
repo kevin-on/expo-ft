@@ -12,7 +12,6 @@ from pathlib import Path
 import h5py
 import numpy as np
 from PIL import Image
-import pyarrow.parquet as pq
 
 
 IMAGE_KEYS = ("exterior_image_1_left", "exterior_image_2_left", "wrist_image_left")
@@ -64,6 +63,8 @@ def write_verified_episode(path, arrays, episode_index, fps):
 
 
 def convert(dataset, output):
+    import pyarrow.parquet as pq
+
     dataset, output = Path(dataset).resolve(), Path(output).resolve()
     info = json.loads((dataset / "meta/info.json").read_text())
     if info["codebase_version"] != "v2.1" or any(info["features"][key]["dtype"] != "image" for key in IMAGE_KEYS):
