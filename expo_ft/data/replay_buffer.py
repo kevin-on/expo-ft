@@ -369,6 +369,7 @@ class PiReplayBuffer(Dataset):
         
         # Split at the model transforms; the seam is where extra state dims are appended.
         transforms = [
+            _transforms.InjectDefaultPrompt(self._prompt),
             *self._data_config.repack_transforms.inputs,
             *self._data_config.data_transforms.inputs,
             _transforms.Normalize(
