@@ -9,5 +9,5 @@
   "wrist_camera_serial": "12841040",
   "side_camera_id": "29838012_left",
   "wrist_camera_id": "12841040_left",
-  "spacemouse_device_path": "/dev/hidraw0"
+  "spacemouse_device_path": "/dev/hidraw4"
 }
