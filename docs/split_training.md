@@ -4,6 +4,13 @@ This is an opt-in path in `train_pi_robo.py`. `--split_role=local` (the default)
 keeps the existing single-process behavior. The split path supports synchronous
 EXPO episode rounds, one or two robots, and `delay=0`.
 
+The current DROID configuration enables `pi05_omit_image_keys=("right_wrist_0_rgb",)`
+and requires companion OpenPI commit `19c1b33951bff0a80782a4d21cb552d641555d3f`
+on both learner and inference hosts. OpenPI is a separate ignored checkout, so
+merging EXPO alone does not update it. This skips the permanently masked dummy
+camera in the pi0.5 prefix; the real side and wrist inputs remain present. The
+full model config, including this option, participates in snapshot identity checks.
+
 ```text
 WS robot clients <--> inference application <--> shared RAM <--> transport
                                                                       |
@@ -530,3 +537,22 @@ and their sizes matched node-local results (17,469,107,377 bytes). No independen
 process restored the shared copy. Test steps, listeners and credentials were
 cleaned; the held GPU allocations remain available. Detailed results are under
 `gpu-net-2/` in the evidence paths above.
+
+### Dummy-camera omission integration (2026-09-26)
+
+EXPO merge `4d70165` combines the optimized WAN transport with `042b312`; its
+companion OpenPI revision is `19c1b33`. Experimental critic candidate grouping
+is not included. The same H200 ×1 / GH200 ×4 recorded-data test passed twice:
+24 episodes, 1,186 verified transitions, six actor / 120 critic updates, exact
+installed parameters and inputs, and in-process checkpoint save/restore.
+
+Steady three-update time fell from **33.17 s to 28.02 / 28.06 s** (about 15.5%,
+including replay preparation). Updated 2.018 GB policy receive took **6.24 / 6.73 s**.
+GPU installation took **34.08 / 4.28 s**: the first-run delay was not reproduced,
+but its cause remains unidentified. The new graph compiled on the first run.
+Cross-host actions still differ slightly (maximum 0.00345, same candidate selected);
+neither numerical parity nor physical task success is established.
+
+Both outputs persisted to shared storage, test services/credentials were removed,
+and parent GPU allocations were retained. Exact timing boundaries and evidence:
+`/scr/kevinon/workspace/expo-ft-split-validation/20260926-omit-camera/REPORT.md`.
