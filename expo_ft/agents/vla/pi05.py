@@ -76,8 +76,9 @@ def pi05_init_train_state(
     *,
     resume: bool,
     is_target: bool = False,
+    inference_only: bool = False,
 ) -> tuple[training_utils.TrainState, Any]:
-    tx = _optimizer.create_optimizer(
+    tx = optax.set_to_zero() if inference_only else _optimizer.create_optimizer(
         config.optimizer, config.lr_schedule, weight_decay_mask=None
     )
 
@@ -104,9 +105,9 @@ def pi05_init_train_state(
             params=params,
             model_def=nnx.graphdef(model),
             tx=tx,
-            opt_state=tx.init(params.filter(config.trainable_filter)),
-            ema_decay=config.ema_decay,
-            ema_params=None if config.ema_decay is None else params,
+            opt_state=() if inference_only else tx.init(params.filter(config.trainable_filter)),
+            ema_decay=None if inference_only else config.ema_decay,
+            ema_params=None if inference_only or config.ema_decay is None else params,
         )
 
     train_state_shape = jax.eval_shape(init, init_rng)
@@ -367,7 +368,7 @@ def _jitted_pack_observation(transformed_inputs):
 
 
 def build_pi05(config, seed, mesh, data_sharding, replicated_sharding,
-               resume, default_prompt):
+               resume, default_prompt, inference_only=False):
     """Build Pi05 actor, train state, target params, and metadata from agent config.
 
     Returns (actor, actor_train_state, target_actor_params, agent_kwargs, metadata)
@@ -392,8 +393,11 @@ def build_pi05(config, seed, mesh, data_sharding, replicated_sharding,
         replicated_sharding=replicated_sharding,
         freeze_pi05_encoder=freeze_encoder,
         infer_device=jax.devices()[0],
+        inference_only=inference_only,
     )
-    if resume:
+    if inference_only:
+        target_actor_params = None
+    elif resume:
         target_actor_params = actor.get_params(actor_train_state)
     else:
         target_actor_params = actor.init_target_params(target_rng, resume=resume)
@@ -504,6 +508,7 @@ class Pi05Agent(Model):
         default_prompt: Optional[str] = None,
         freeze_pi05_encoder: bool = False,
         infer_device: Optional[jax.Device] = None,
+        inference_only: bool = False,
     ) -> tuple["Pi05Agent", Any]:
         """Initialize a Pi05Agent instance using init_train_state."""
         train_state, train_state_sharding = pi05_init_train_state(
@@ -512,6 +517,7 @@ class Pi05Agent(Model):
             mesh,
             resume=resume,
             is_target=False,
+            inference_only=inference_only,
         )
 
         agent = cls(
@@ -694,4 +700,3 @@ class Pi05Agent(Model):
             transformed_inputs, train_state, key, prefix_padded, num_samples, noise=noise,
         )
         return self._unpad_actions(x_clean), None
-

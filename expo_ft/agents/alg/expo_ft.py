@@ -212,6 +212,7 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
     actor_success_only: bool = struct.field(pytree_node=False)
     _infer_cache: Optional[dict] = struct.field(pytree_node=False, default=None)
     critic_camera_keys: Tuple[str, ...] = struct.field(pytree_node=False, default=CRITIC_CAMERA_KEYS)
+    rollout_cache: bool = struct.field(pytree_node=False, default=True)
 
     @classmethod
     def create(
@@ -271,6 +272,8 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
         actor_success_only: bool = False,
         use_full_augmentation: bool = True,
         critic_camera_keys: Tuple[str, ...] = CRITIC_CAMERA_KEYS,
+        inference_only: bool = False,
+        rollout_cache: bool = True,
         **kwargs,
     ):
         action_dim = action_space.shape[-1]
@@ -310,7 +313,7 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
         batch_encoder = TrainState.create(
             apply_fn=batch_encoder_def.apply,
             params=batch_encoder_params,
-            tx=optax.adam(learning_rate=critic_lr),
+            tx=optax.set_to_zero() if inference_only else optax.adam(learning_rate=critic_lr),
         )
 
         batch_encoder_shape = jax.eval_shape(lambda: batch_encoder)
@@ -342,7 +345,7 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
         edit_actor = TrainState.create(
             apply_fn=edit_actor_def.apply, 
             params=edit_actor_params, 
-            tx=optax.adam(learning_rate=actor_lr),
+            tx=optax.set_to_zero() if inference_only else optax.adam(learning_rate=actor_lr),
         )
 
         edit_actor_shape = jax.eval_shape(lambda: edit_actor)
@@ -376,7 +379,9 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
             include_state=include_state,
         )
         critic_params = critic_def.init(critic_key, critic_observations, critic_actions, p=critic_states_ext)["params"]
-        if critic_weight_decay is not None:
+        if inference_only:
+            tx = optax.set_to_zero()
+        elif critic_weight_decay is not None:
             tx = optax.adamw(
                 learning_rate=critic_lr,
                 weight_decay=critic_weight_decay,
@@ -406,21 +411,22 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
             tx=optax.GradientTransformation(lambda _: None, lambda _: None),
         ).replace(step=critic.step)
 
-        temp_def = Temperature(init_temperature)
-        temp_params = temp_def.init(temp_key)["params"]
-        temp = TrainState.create(
-            apply_fn=temp_def.apply,
-            params=temp_params,
-            tx=optax.adam(learning_rate=temp_lr),
-        )
-
-        temp_shape = jax.eval_shape(lambda: temp)
-        temp_sharding = _sharding.fsdp_sharding(temp_shape, mesh, log=True)
-        temp = jax.jit(
-            lambda x: x,
-            in_shardings=replicated_sharding,
-            out_shardings=temp_sharding,
-        )(temp)
+        temp = None
+        if not inference_only:
+            temp_def = Temperature(init_temperature)
+            temp_params = temp_def.init(temp_key)["params"]
+            temp = TrainState.create(
+                apply_fn=temp_def.apply,
+                params=temp_params,
+                tx=optax.adam(learning_rate=temp_lr),
+            )
+            temp_shape = jax.eval_shape(lambda: temp)
+            temp_sharding = _sharding.fsdp_sharding(temp_shape, mesh, log=True)
+            temp = jax.jit(
+                lambda x: x,
+                in_shardings=replicated_sharding,
+                out_shardings=temp_sharding,
+            )(temp)
 
 
         agent = cls(
@@ -436,7 +442,7 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
             edit_action_xyzg=edit_action_xyzg,
             batch_split=batch_split,
             actor_tau=jax.device_put(actor_tau, replicated_sharding),
-            critic=critic,
+            critic=None if inference_only else critic,
             target_critic=target_critic,
             batch_encoder=batch_encoder,
             temp=temp,
@@ -461,8 +467,9 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
             freeze_critic_encoder=freeze_critic_encoder,
             actor_success_only=actor_success_only,
             critic_camera_keys=tuple(critic_camera_keys),
+            rollout_cache=rollout_cache,
         )
-        if not resume:
+        if not resume and rollout_cache:
             agent = agent.cache_infer_params()
         return agent
 
@@ -890,7 +897,9 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
         new_agent, info = learner._update_jit(
             update_agent, batch, utd_ratio, actor_batch
         )
-        return new_agent.cache_infer_params(self._infer_cache), info
+        if self.rollout_cache:
+            new_agent = new_agent.cache_infer_params(self._infer_cache)
+        return new_agent, info
 
 
     @partial(jax.jit, static_argnames="utd_ratio")

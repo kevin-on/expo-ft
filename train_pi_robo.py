@@ -74,6 +74,10 @@ flags.DEFINE_integer(
 flags.DEFINE_float("sim_latency", 0.0, "Simulated extra inference latency in ms added to each sample_actions call; 0 disables.")
 
 flags.DEFINE_string("dataset_path", "", "Path to preprocessed HDF5 demonstration episodes.")
+flags.DEFINE_enum("split_role", "local", ["local", "learner", "inference"], "Separate learner/rollout processes using local shared-RAM transport.")
+flags.DEFINE_string("split_mailbox", "", "Local socket/marker directory shared with this machine's RAM transport process.")
+flags.DEFINE_string("split_session", "", "Fresh session ID shared by both roles; use a new ID after restarting a run.")
+flags.DEFINE_float("split_timeout", 3600, "Maximum wait for peer progress, in seconds.")
 config_flags.DEFINE_config_file(
     "config",
     "configs/model/expo_ft_pi_config.py",
@@ -91,6 +95,18 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     init_logging()
+    split = FLAGS.split_role != "local"
+    if split:
+        if (FLAGS.config.model_cls != "EXPOLearner" or FLAGS.update_type != "episode"
+                or FLAGS.delay != 0 or FLAGS.num_robot not in (1, 2)):
+            raise ValueError("Split mode requires EXPOLearner, episode updates, delay=0, and 1 or 2 robots")
+        if not FLAGS.split_mailbox or not FLAGS.split_session:
+            raise ValueError("Split mode requires --split_mailbox and --split_session")
+        if FLAGS.config.N < 1 or FLAGS.config.n_edit_samples < 0 or (FLAGS.config.N > 1
+                and FLAGS.config.n_edit_samples not in (0, FLAGS.config.N)):
+            raise ValueError("The current EXPO sampler requires n_edit_samples=0 or N")
+        if FLAGS.resume and not FLAGS.checkpoint_buffer:
+            raise ValueError("Split resume requires saved replay records")
     if FLAGS.num_robot < 1:
         raise ValueError("num_robot must be positive")
     multi_robot = FLAGS.num_robot > 1
@@ -105,6 +121,15 @@ def main(_):
         if (FLAGS.config_task.action_space, FLAGS.config_task.gripper_action_space) != ("cartesian_velocity", "velocity"):
             raise ValueError("Two-robot mirror setup requires Cartesian velocity + gripper velocity")
     assert FLAGS.offline_ratio >= 0.0 and FLAGS.offline_ratio <= 1.0
+
+    if split and (FLAGS.num_updates < 0 or FLAGS.step_interval < 1 or FLAGS.replan_steps < 1
+                  or FLAGS.max_steps < 1 or FLAGS.config_task.control_hz <= 0):
+        raise ValueError("Invalid split update/collection settings")
+    if FLAGS.split_role == "inference":
+        from expo_ft.distributed.runner import run_inference
+        set_compilation_cache_dir("split-inference")
+        run_inference(FLAGS)
+        return
 
     if FLAGS.batch_size % jax.device_count() != 0:
         raise ValueError(
@@ -218,6 +243,8 @@ def main(_):
     if model_cls == "RealTimeEXPOFTLearner":
         agent_kwargs["delay"] = FLAGS.delay
     agent_kwargs["critic_camera_keys"] = critic_camera_keys
+    if split:
+        agent_kwargs["rollout_cache"] = False
 
     agent = load_agent(
         seed=FLAGS.seed,
@@ -241,15 +268,22 @@ def main(_):
     start_step = 0
     if resuming:
         agent = restore_checkpoint(checkpoint_manager, agent)
-        if hasattr(agent, "cache_infer_params"):
+        if hasattr(agent, "cache_infer_params") and not split:
             agent = agent.cache_infer_params()
         steps = tuple(checkpoint_manager.all_steps())
         latest_step = max(steps) if steps else None
         if latest_step is not None:
             start_step = latest_step
             logging.info("Resuming from step %d", start_step)
-        if not multi_robot:
+        if not multi_robot and not split:
             batch_processor.restore(checkpoint_dir_path, up_to_step=latest_step)
+
+    if FLAGS.split_role == "learner":
+        from expo_ft.distributed.runner import run_learner
+        run_learner(FLAGS, agent, replay_buffers, batch_processor, checkpoint_manager,
+                    checkpoint_dir, save_checkpoint, start_step, resuming, replicated_sharding,
+                    mirror_robot=1 if FLAGS.num_robot == 2 else None)
+        return
 
     if multi_robot:
         from expo_ft.utils.multi_robot_training import train_multi_robot

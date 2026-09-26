@@ -666,6 +666,7 @@ def restore_replay_buffer(
     *,
     up_to_step: int | None = None,
     max_transitions: int | None = None,
+    skip_dummy_actions: bool = True,
 ) -> Any:
     """Restore replay buffer by re-inserting saved transitions from disk.
     If max_transitions is set, stop after inserting that many (e.g. for faster loading)."""
@@ -695,7 +696,7 @@ def restore_replay_buffer(
             break
         with p.open("rb") as f:
             transition = cloudpickle.load(f)
-        if "actions" in transition and np.allclose(transition["actions"], -1):
+        if skip_dummy_actions and "actions" in transition and np.allclose(transition["actions"], -1):
             skipped += 1
             continue
         replay_buffer.insert(transition)

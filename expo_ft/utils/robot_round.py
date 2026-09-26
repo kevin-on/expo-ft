@@ -11,17 +11,28 @@ import numpy as np
 from expo_ft.env.sft_eval import canonical_observation, physical_action
 
 
-def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=None):
+def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=None,
+                  on_transition=None, on_episode_end=None, check_session=None):
     """Return episodes in robot order. No reset or inference survives this barrier.
 
     Workers perform RPCs concurrently and submit inference requests to one queue.
     The caller alone touches the policy, including its RNG. On failure, close all
     connections to interrupt pending RPCs, and discard the incomplete round.
+    An optional session check also runs while workers wait for WS/reset replies.
     """
     requests = queue.Queue()
     stopped = threading.Event()
+    next_check = 0.0
+
+    def check(force=False):
+        nonlocal next_check
+        if check_session is not None and (force or time.monotonic() >= next_check):
+            check_session()
+            next_check = time.monotonic() + 0.1
 
     def collect(index, env):
+        if stopped.is_set():
+            return None
         canonical = mirror_robot is not None
         mirror = index == mirror_robot
         observation = env.reset()
@@ -38,6 +49,8 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
                 while not response.done():
                     if stopped.wait(0.01):
                         return None
+                if stopped.is_set():
+                    return None
                 plan.extend(response.result()[:replan_steps])
             # Observation, RPC and inference time are part of the control period.
             # Anchor each period to the previous actual dispatch, with no catch-up burst.
@@ -66,14 +79,20 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
                 observations=observation, actions=action, rewards=reward,
                 masks=mask, dones=done, is_hil=action_type == "human",
             ))
+            if on_transition is not None:
+                on_transition(index, len(transitions) - 1, transitions[-1])
             observation = next_observation
             if done:
+                if on_episode_end is not None:
+                    on_episode_end(index, len(transitions), success)
                 return transitions, success
 
     with ThreadPoolExecutor(max_workers=len(envs)) as workers:
-        episodes = [workers.submit(collect, index, env) for index, env in enumerate(envs)]
         try:
+            check(force=True)
+            episodes = [workers.submit(collect, index, env) for index, env in enumerate(envs)]
             while not all(episode.done() for episode in episodes):
+                check()
                 for episode in episodes:
                     if episode.done():
                         episode.result()  # surface failures before another policy request
@@ -81,7 +100,10 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
                     observation, response = requests.get(timeout=0.01)
                 except queue.Empty:
                     continue
-                response.set_result(np.asarray(sample_actions(observation)))
+                actions = np.asarray(sample_actions(observation))
+                check(force=True)  # sampling/JIT may have blocked since the last check
+                response.set_result(actions)
+            check(force=True)
             return [episode.result() for episode in episodes]
         except BaseException:
             stopped.set()

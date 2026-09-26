@@ -61,9 +61,6 @@ class EnvClient:
             logging.warning("Could not set TCP_NODELAY: %s", e)
 
     def _ensure_server(self):
-        if self._server is not None:
-            return
-
         def _handler(conn):
             self._set_nodelay(conn)
             done = threading.Event()
@@ -74,15 +71,22 @@ class EnvClient:
                 self._cond.notify_all()
             done.wait()  # hold the connection open until the loop releases it
 
-        self._server = websockets.sync.server.serve(
-            _handler,
-            self.host,
-            self.port,
-            compression=None,
-            max_size=None,
-            close_timeout=100 if self.reconnect else 2,
-        )
-        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        # Cancellation can close this client while its first RPC starts listening.
+        # Publish/start the server under the same lock used by close().
+        with self._cond:
+            if self._closed:
+                raise RuntimeError("Environment connection closed")
+            if self._server is not None:
+                return
+            self._server = websockets.sync.server.serve(
+                _handler,
+                self.host,
+                self.port,
+                compression=None,
+                max_size=None,
+                close_timeout=100 if self.reconnect else 2,
+            )
+            threading.Thread(target=self._server.serve_forever, daemon=True).start()
         logging.info("EnvClient listening for rollout client on %s:%s", self.host, self.port)
 
     def _accept(self):
@@ -143,6 +147,8 @@ class EnvClient:
                 if self._closed:
                     raise RuntimeError("Environment connection closed")
                 conn = self._get_connection()
+                if self._closed:
+                    raise RuntimeError("Environment connection closed")
                 conn.send(self._packer.pack({"operation": operation, **request}))
                 recv_start = time.time()
                 raw = conn.recv()
