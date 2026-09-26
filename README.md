@@ -365,7 +365,7 @@ export SFT_CHECKPOINT=/path/to/completed/run/3889
 export SFT_ASSET_ID=expo_ft/pick_mixed_100
 export EXPO_DATASET=/path/to/demo/episode-parent
 export EXPO_EVAL_OUTPUT_DIR=/path/to/eval/mixed100-step3889-robot0
-export EXPO_CLIENT_VIDEO_DIR=/scr/kevinon/data/eval/mixed100-step3889-robot0
+export EXPO_CLIENT_VIDEO_DIR=/scr/kevinon/workspace/expo-ft-fork/data/videos/sft-eval/mixed100-step3889-robot0
 bash scripts/pick/eval_sft_policy.sh 0
 
 # Workstation, when ready to move the selected robot:
