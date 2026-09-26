@@ -87,7 +87,7 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
                 metrics[f"robot-{index}/return"] = sum(t["rewards"] for t in transitions)
 
             count, pending_steps = updates_for_round(
-                pending_steps, round_steps, can_update=episode_count >= 10 and step >= flags.batch_size,
+                pending_steps, round_steps, can_update=episode_count >= 10 * len(buffers) and step >= flags.batch_size,
                 num_updates=flags.num_updates, step_interval=flags.step_interval,
             )
             for _ in range(count):
