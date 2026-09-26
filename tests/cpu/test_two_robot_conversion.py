@@ -6,6 +6,7 @@ Run directly to avoid loading the rest of the test suite:
 """
 
 import copy
+import json
 import math
 from pathlib import Path
 import sys
@@ -73,6 +74,27 @@ class TwoRobotConversionTests(unittest.TestCase):
             conversion.select_episode_pools(paths[:49], paths, seed=42)
         with self.assertRaisesRegex(ValueError, "same source"):
             conversion.select_episode_pools(paths, paths, seed=42)
+
+    def test_saved_selection_validation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            selection = root / "selection.json"
+            saved = {"mirror_robot": 1, "ordered_top50": {"robot0": ["/old/7/traj.hdf5"], "robot1": []}}
+            selection.write_text(json.dumps(saved))
+            with self.assertRaisesRegex(ValueError, "Missing"):
+                conversion.load_selection(selection, (root / "r0", root / "r1"), (1, 0), 1)
+            p = root / "r0/7/traj.hdf5";p.parent.mkdir(parents=True);p.touch()
+            _, selected = conversion.load_selection(selection, (root / "r0", root / "r1"), (1, 0), 1)
+            self.assertEqual(selected, [(0, p)])
+            for counts in ((0, 0), (-1, 1), (2, 0)):
+                with self.assertRaises(ValueError):
+                    conversion.load_selection(selection, (root / "r0", root / "r1"), counts, 1)
+            with self.assertRaisesRegex(ValueError, "disagrees"):
+                conversion.load_selection(selection, (root / "r0", root / "r1"), (1, 0), 0)
+            saved["ordered_top50"]["robot0"] *= 2
+            selection.write_text(json.dumps(saved))
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                conversion.load_selection(selection, (root / "r0", root / "r1"), (1, 0), 1)
 
     def test_mirror_uses_side_left_wrist_right_and_preserves_source(self):
         step = example_step()

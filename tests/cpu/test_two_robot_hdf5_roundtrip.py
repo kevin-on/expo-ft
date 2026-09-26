@@ -2,7 +2,7 @@
 
 Run separately in the SFT environment, with BLAS/OMP threads limited to one:
     python tests/cpu/test_two_robot_hdf5_roundtrip.py
-Only the test patches the episode counts and LeRobot image-writer concurrency.
+The test exercises asymmetric counts and saved permutation order.
 """
 import json
 from pathlib import Path
@@ -60,21 +60,25 @@ class TwoRobotHdf5RoundtripTests(unittest.TestCase):
                               image_writer_threads=1)
                 return create(**kwargs)
 
-            # Exercise the real conversion loop without changing production dataset sizes.
-            with patch.object(conversion, "EPISODES_PER_ROBOT", (1, 2)), \
-                 patch.object(original, "HF_LEROBOT_HOME", lerobot_root), \
-                 patch.object(original.LeRobotDataset, "create", side_effect=create_small):
-                conversion.main(root / "robot0", root / "robot1", 1, str(task), "test/tiny", 3,
-                                hdf5_root=root / "direct")
-
-            for count in (2, 4):
-                dataset = lerobot_root / f"test/tiny_{count}"
+            selection = root / "selection.json"
+            selection.write_text(json.dumps({"mirror_robot": 1, "shuffle_seeds": {"robot0": 3, "robot1": 4},
+                "ordered_top50": {f"robot{r}": [f"/old/robot{r}/{i}/traj.hdf5" for i in (1, 0)] for r in (0, 1)}}))
+            for robot1_count in (0, 1, 2):
+                count = 2 + robot1_count
+                repo_id = f"test/tiny_{count}"
+                with patch.object(original, "HF_LEROBOT_HOME", lerobot_root), \
+                     patch.object(original.LeRobotDataset, "create", side_effect=create_small):
+                    conversion.main(root / "robot0", root / "robot1", 1, str(task), repo_id,
+                                    selection, 2, robot1_count, hdf5_root=root / "direct")
+                dataset = lerobot_root / repo_id
                 manifest = json.loads((dataset / "meta/source_episodes.json").read_text())
                 report = convert(dataset, root / f"exported_{count}")
                 self.assertEqual(report["episodes"], count)
                 self.assertEqual(report["frames"], sum(e["frames"] for e in manifest["episodes"]))
-                self.assertEqual([e["robot_id"] for e in manifest["episodes"]], [0, 1] * (count // 2))
-                self.assertEqual([e["mirrored"] for e in manifest["episodes"]], [False, True] * (count // 2))
+                expected_robots = {0: [0, 0], 1: [0, 1, 0], 2: [0, 1, 0, 1]}[robot1_count]
+                self.assertEqual([e["robot_id"] for e in manifest["episodes"]], expected_robots)
+                self.assertEqual([e["source_episode"] for e in manifest["episodes"] if e["robot_id"] == 0], [1, 0])
+                self.assertEqual([e["mirrored"] for e in manifest["episodes"]], [r == 1 for r in expected_robots])
                 expected_keys = {
                     "saved_observation/exterior_image_1_left", "saved_observation/exterior_image_2_left",
                     "saved_observation/wrist_image_left", "saved_observation/cartesian_position",
@@ -94,7 +98,7 @@ class TwoRobotHdf5RoundtripTests(unittest.TestCase):
                             self.assertEqual(direct[key].dtype, exported[key].dtype)
                             np.testing.assert_array_equal(direct[key][:], exported[key][:], err_msg=f"episode {index}: {key}")
 
-            print("Verified both nested datasets: direct and LeRobot-exported HDF5 agree exactly.")
+            print("Verified single-robot, asymmetric and balanced datasets: direct and LeRobot-exported HDF5 agree exactly.")
 
 
 if __name__ == "__main__":

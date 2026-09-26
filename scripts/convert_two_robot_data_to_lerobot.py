@@ -12,9 +12,10 @@ Example (in the existing SFT/LeRobot environment, from the repository root):
         --robot0-dir data/pick_cube_balance/robot0/success \
         --robot1-dir data/pick_cube_balance/robot1/success \
         --mirror-robot 1 --task-config configs/task/pick.py \
-        --repo-prefix expo_ft/pick_mixed --seed 42
+        --selection selection_seed3.json --robot0-count 40 --robot1-count 5 \
+        --repo-id expo_ft/pick_r0_40_r1_5
 
-Outputs <repo-prefix>_20, _40, _60, _80, _100 under HF_LEROBOT_HOME.
+Outputs one <repo-id> under HF_LEROBOT_HOME, using saved permutation prefixes.
 The same final frames are also saved to <hdf5-root>/<repo-name>/<episode>/traj.hdf5.
 --hdf5-root defaults to HF_LEROBOT_HOME/hdf5. No second mirror/resize is applied.
 The physical right-hand robot is not inferred from its ID: set --mirror-robot.
@@ -24,6 +25,7 @@ Normalization and SFT are separate steps; neither is launched here.
 
 import argparse
 import json
+import hashlib
 from pathlib import Path
 import random
 import sys
@@ -77,6 +79,36 @@ def select_episode_pools(robot0_paths, robot1_paths, seed):
 def mixed_episodes(pools, count):
     """Alternate robots while retaining each original episode as a separate episode."""
     return [(robot_id, pools[robot_id][i]) for i in range(count) for robot_id in (0, 1)]
+
+
+def load_selection(selection, robot_dirs, counts, mirror_robot):
+    """Use saved order, remapping episode IDs to current successful-demo roots."""
+    selection = Path(selection)
+    saved = json.loads(selection.read_text())
+    if saved["mirror_robot"] != mirror_robot:
+        raise ValueError("mirror_robot disagrees with saved selection")
+    if any(count < 0 for count in counts) or not sum(counts):
+        raise ValueError("Episode counts must be nonnegative with a positive total")
+    pools = []
+    for robot, (directory, count) in enumerate(zip(robot_dirs, counts)):
+        ordered = saved["ordered_top50"][f"robot{robot}"]
+        if count > len(ordered):
+            raise ValueError(f"robot{robot}: requested {count}, selection has {len(ordered)}")
+        ids = [Path(path).parent.name for path in ordered]
+        if any(not name.isdigit() for name in ids) or len(set(ids)) != len(ids):
+            raise ValueError(f"robot{robot}: invalid or duplicate episode IDs")
+        root = Path(directory).resolve()
+        paths = [(root / name / "traj.hdf5").resolve() for name in ids[:count]]
+        for path in paths:
+            if not path.is_relative_to(root) or not path.is_file():
+                raise ValueError(f"Missing or out-of-root source episode: {path}")
+        pools.append(paths)
+    if set(pools[0]) & set(pools[1]):
+        raise ValueError("The two robot inputs contain the same source episodes")
+    # Alternate while both robots have episodes; append the remaining robot's tail.
+    selected = [(robot, pools[robot][i]) for i in range(max(counts))
+                for robot in (0, 1) if i < len(pools[robot])]
+    return saved, selected
 
 
 def validate_episode(path, mirror):
@@ -155,17 +187,17 @@ def save_final_episode(frames, path, episode_index, fps):
     write_verified_episode(path, arrays, episode_index, fps)
 
 
-def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_prefix, seed, hdf5_root=None):
+def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_id, selection,
+         robot0_count, robot1_count, hdf5_root=None):
     if mirror_robot not in (0, 1):
         raise ValueError("mirror_robot must be 0 or 1")
-    prefix = Path(repo_prefix)
+    prefix = Path(repo_id)
     if prefix.is_absolute() or ".." in prefix.parts or len(prefix.parts) != 2:
-        raise ValueError("repo_prefix must be a dataset ID such as expo_ft/pick_mixed")
-    pools = select_episode_pools(find_episodes(robot0_dir), find_episodes(robot1_dir), seed)
-    lengths = {
-        path: validate_episode(path, mirror=(robot_id == mirror_robot))
-        for robot_id, paths in enumerate(pools) for path in paths
-    }
+        raise ValueError("repo_id must be a dataset ID such as expo_ft/pick_mixed")
+    saved_selection, episode_paths = load_selection(
+        selection, (robot0_dir, robot1_dir), (robot0_count, robot1_count), mirror_robot)
+    lengths = {path: validate_episode(path, mirror=(robot_id == mirror_robot))
+               for robot_id, path in episode_paths}
 
     # Load the existing conversion dependencies only for a real conversion.
     # --help and the small helper tests do not import LeRobot, Torch, or robot SDKs.
@@ -184,111 +216,111 @@ def main(robot0_dir, robot1_dir, mirror_robot, task_config, repo_prefix, seed, h
     gripper_key = f"gripper_{task_cfg.gripper_action_space}"
     action_dim = 7
     hdf5_root = Path(hdf5_root) if hdf5_root is not None else original.HF_LEROBOT_HOME / "hdf5"
-    repo_names = [f"{repo_prefix}_{2 * count}" for count in EPISODES_PER_ROBOT]
-    for repo_name in repo_names:
-        for output_path in (original.HF_LEROBOT_HOME / repo_name, hdf5_root / repo_name):
-            if output_path.exists():
-                raise FileExistsError(f"Output already exists; choose a new --repo-prefix: {output_path}")
-        if (original.HF_LEROBOT_HOME / repo_name).resolve() == (hdf5_root / repo_name).resolve():
-            raise ValueError("LeRobot and HDF5 output directories must be different")
-
-    for count, repo_name in zip(EPISODES_PER_ROBOT, repo_names):
-        episode_paths = mixed_episodes(pools, count)
-        hdf5_path = hdf5_root / repo_name
-        hdf5_path.mkdir(parents=True, exist_ok=False)
-        print(f"Creating {repo_name}: {count} episodes per robot, fps={fps}")
-        # Same Cartesian-state feature schema and writer options as the original converter.
-        dataset = original.LeRobotDataset.create(
-            repo_id=repo_name,
-            robot_type="panda",
-            fps=fps,
-            features={
-                "exterior_image_1_left": {
-                    "dtype": "image", "shape": (180, 320, 3),
-                    "names": ["height", "width", "channel"],
-                },
-                "exterior_image_2_left": {
-                    "dtype": "image", "shape": (180, 320, 3),
-                    "names": ["height", "width", "channel"],
-                },
-                "wrist_image_left": {
-                    "dtype": "image", "shape": (180, 320, 3),
-                    "names": ["height", "width", "channel"],
-                },
-                "cartesian_position": {
-                    "dtype": "float32", "shape": (6,), "names": ["cartesian_position"],
-                },
-                "gripper_position": {
-                    "dtype": "float32", "shape": (1,), "names": ["gripper_position"],
-                },
-                "actions": {
-                    "dtype": "float32", "shape": (action_dim,), "names": ["actions"],
-                },
+    repo_name = repo_id
+    for output_path in (original.HF_LEROBOT_HOME / repo_name, hdf5_root / repo_name):
+        if output_path.exists():
+            raise FileExistsError(f"Output already exists; choose a new --repo-id: {output_path}")
+    if (original.HF_LEROBOT_HOME / repo_name).resolve() == (hdf5_root / repo_name).resolve():
+        raise ValueError("LeRobot and HDF5 output directories must be different")
+    hdf5_path = hdf5_root / repo_name
+    hdf5_path.mkdir(parents=True, exist_ok=False)
+    print(f"Creating {repo_name}: robot0={robot0_count}, robot1={robot1_count}, fps={fps}")
+    # Same Cartesian-state feature schema and writer options as the original converter.
+    dataset = original.LeRobotDataset.create(
+        repo_id=repo_name,
+        robot_type="panda",
+        fps=fps,
+        features={
+            "exterior_image_1_left": {
+                "dtype": "image", "shape": (180, 320, 3),
+                "names": ["height", "width", "channel"],
             },
-            image_writer_threads=10,
-            image_writer_processes=5,
-        )
-        try:
-            manifest = {
-                "repo_id": repo_name,
-                "episodes_per_robot": count,
-                "shuffle_seeds": {"robot0": seed, "robot1": seed + 1},
-                "mirror_robot": mirror_robot,
-                "mirror": "y reflection; xyz Euler; horizontal flip of selected side and wrist views",
-                "image_sources": {
-                    f"robot{robot_id}": {
-                        "side": "exterior_image_1_left" if robot_id == mirror_robot else "exterior_image_1_right",
-                        "wrist": "wrist_image_right" if robot_id == mirror_robot else "wrist_image_left",
-                        "horizontal_flip": robot_id == mirror_robot,
-                    }
-                    for robot_id in (0, 1)
-                },
-                "fps": fps,
-                "task_config": str(Path(task_config).resolve()),
-                "episodes": [],
-            }
-            for episode_index, (robot_id, episode_path) in enumerate(episode_paths):
-                print(f"processing robot{robot_id} traj: {episode_path}")
-                trajectory = original.load_trajectory(str(episode_path), read_cameras=False)
-                if len(trajectory) != lengths[episode_path]:
-                    raise ValueError(f"Episode changed since validation: {episode_path}")
-                final_frames = []
-                for step in trajectory:
-                    step = prepare_step_for_sft(step, mirror=(robot_id == mirror_robot))
-                    # Same image/state/action assembly as the original Cartesian converter.
-                    frame = {
-                        "exterior_image_1_left": original.resize_image(
-                            step["saved_observation"]["exterior_image_1_left"], (320, 180)),
-                        "exterior_image_2_left": original.resize_image(
-                            step["saved_observation"]["exterior_image_2_left"], (320, 180)),
-                        "wrist_image_left": original.resize_image(
-                            step["saved_observation"]["wrist_image_left"], (320, 180)),
-                        "cartesian_position": np.asarray(
-                            step["saved_observation"]["cartesian_position"], dtype=np.float32),
-                        "gripper_position": np.asarray(
-                            step["saved_observation"]["gripper_position"][None], dtype=np.float32),
-                        "actions": original._action_from_step(step["action"], action_key, gripper_key),
-                        "task": language_instruction,
-                    }
-                    final_frames.append(frame)
-                    # LeRobot may add/pop dictionary keys while buffering the frame.
-                    dataset.add_frame(frame.copy())
-                dataset.save_episode()
-                save_final_episode(final_frames, hdf5_path / str(episode_index) / "traj.hdf5",
-                                   episode_index, fps)
-                manifest["episodes"].append({
-                    "episode_index": episode_index,
-                    "robot_id": robot_id,
-                    "source_hdf5": str(episode_path),
-                    "mirrored": robot_id == mirror_robot,
-                    "frames": len(trajectory),
-                })
-            manifest_path = original.HF_LEROBOT_HOME / repo_name / "meta" / "source_episodes.json"
-            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-            print(f"Saved {repo_name}; source episode manifest: {manifest_path}")
-            print(f"Online FT HDF5 episodes: {hdf5_path}")
-        finally:
-            dataset.stop_image_writer()
+            "exterior_image_2_left": {
+                "dtype": "image", "shape": (180, 320, 3),
+                "names": ["height", "width", "channel"],
+            },
+            "wrist_image_left": {
+                "dtype": "image", "shape": (180, 320, 3),
+                "names": ["height", "width", "channel"],
+            },
+            "cartesian_position": {
+                "dtype": "float32", "shape": (6,), "names": ["cartesian_position"],
+            },
+            "gripper_position": {
+                "dtype": "float32", "shape": (1,), "names": ["gripper_position"],
+            },
+            "actions": {
+                "dtype": "float32", "shape": (action_dim,), "names": ["actions"],
+            },
+        },
+        image_writer_threads=4,
+        image_writer_processes=0,
+    )
+    try:
+        manifest = {
+            "repo_id": repo_name,
+            "episodes_per_robot": {"robot0": robot0_count, "robot1": robot1_count},
+            "selection_file": str(Path(selection).resolve()),
+            "selection_sha256": hashlib.sha256(Path(selection).read_bytes()).hexdigest(),
+            "shuffle_seeds": saved_selection["shuffle_seeds"],
+            "mirror_robot": mirror_robot,
+            "mirror": "y reflection; xyz Euler; horizontal flip of selected side and wrist views",
+            "image_sources": {
+                f"robot{robot_id}": {
+                    "side": "exterior_image_1_left" if robot_id == mirror_robot else "exterior_image_1_right",
+                    "wrist": "wrist_image_right" if robot_id == mirror_robot else "wrist_image_left",
+                    "horizontal_flip": robot_id == mirror_robot,
+                }
+                for robot_id in (0, 1)
+            },
+            "fps": fps,
+            "task_config": str(Path(task_config).resolve()),
+            "episodes": [],
+        }
+        for episode_index, (robot_id, episode_path) in enumerate(episode_paths):
+            print(f"processing robot{robot_id} traj: {episode_path}")
+            trajectory = original.load_trajectory(str(episode_path), read_cameras=False)
+            if len(trajectory) != lengths[episode_path]:
+                raise ValueError(f"Episode changed since validation: {episode_path}")
+            final_frames = []
+            for step in trajectory:
+                step = prepare_step_for_sft(step, mirror=(robot_id == mirror_robot))
+                # Same image/state/action assembly as the original Cartesian converter.
+                frame = {
+                    "exterior_image_1_left": original.resize_image(
+                        step["saved_observation"]["exterior_image_1_left"], (320, 180)),
+                    "exterior_image_2_left": original.resize_image(
+                        step["saved_observation"]["exterior_image_2_left"], (320, 180)),
+                    "wrist_image_left": original.resize_image(
+                        step["saved_observation"]["wrist_image_left"], (320, 180)),
+                    "cartesian_position": np.asarray(
+                        step["saved_observation"]["cartesian_position"], dtype=np.float32),
+                    "gripper_position": np.asarray(
+                        step["saved_observation"]["gripper_position"][None], dtype=np.float32),
+                    "actions": original._action_from_step(step["action"], action_key, gripper_key),
+                    "task": language_instruction,
+                }
+                final_frames.append(frame)
+                # LeRobot may add/pop dictionary keys while buffering the frame.
+                dataset.add_frame(frame.copy())
+            dataset.save_episode()
+            save_final_episode(final_frames, hdf5_path / str(episode_index) / "traj.hdf5",
+                               episode_index, fps)
+            manifest["episodes"].append({
+                "episode_index": episode_index,
+                "robot_id": robot_id,
+                "source_hdf5": str(episode_path),
+                "source_episode": int(episode_path.parent.name),
+                "mirrored": robot_id == mirror_robot,
+                "frames": len(trajectory),
+            })
+        manifest_path = original.HF_LEROBOT_HOME / repo_name / "meta" / "source_episodes.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        (hdf5_path / "source_episodes.json").write_text(manifest_path.read_text())
+        print(f"Saved {repo_name}; source episode manifest: {manifest_path}")
+        print(f"Online FT HDF5 episodes: {hdf5_path}")
+    finally:
+        dataset.stop_image_writer()
 
 
 if __name__ == "__main__":
@@ -298,8 +330,10 @@ if __name__ == "__main__":
     parser.add_argument("--mirror-robot", type=int, choices=(0, 1), required=True,
                         help="Physical robot whose data should be mirrored into the other robot's frame")
     parser.add_argument("--task-config", default="configs/task/pick.py")
-    parser.add_argument("--repo-prefix", default="expo_ft/pick_mixed")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--repo-id", required=True)
+    parser.add_argument("--selection", type=Path, required=True)
+    parser.add_argument("--robot0-count", type=int, required=True)
+    parser.add_argument("--robot1-count", type=int, required=True)
     parser.add_argument("--hdf5-root", type=Path, default=None,
                         help="Online FT HDF5 output root (default: HF_LEROBOT_HOME/hdf5)")
     main(**vars(parser.parse_args()))
