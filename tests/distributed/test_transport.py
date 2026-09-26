@@ -135,6 +135,19 @@ class TLSTransportTest(TransportTest):
 
 
 class ValidationTest(unittest.TestCase):
+    def test_chunk_layout_and_header_bound(self):
+        store = Store(4, 100000)
+        self.addCleanup(store.close)
+        meta = dict(id=message_id('test', 'chunks'), topic='test', key='chunks',
+                    size=257, sha256='0' * 64)
+        status = store.offer(meta)
+        self.assertEqual(status['chunk_bytes'], 4)
+        self.assertEqual(status['missing'], list(range(65)))
+        oversized = dict(meta, id=message_id('test', 'large'), key='large', size=4 * 8192 + 1)
+        with self.assertRaisesRegex(ValueError, 'too many chunks'):
+            store.offer(oversized)
+        self.assertEqual(store.rx_bytes, 257)
+
     def test_conflicting_and_incomplete_objects(self):
         import hashlib
         with tempfile.TemporaryDirectory() as directory:

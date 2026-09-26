@@ -57,7 +57,7 @@ ILIAD so rollout RPC latency stays low. Compare update time saved against the
 entire post-update publication/transfer/install delay, not network MB/s alone.
 
 `python -m expo_ft.distributed.transport --config PATH` runs independently of JAX
-and NumPy. Large policies use `parallel_connections` (default 32); records/control
+and NumPy. Large policies use `parallel_connections` (default 64); records/control
 use a separate small-message pool (default 4). These are logical sockets; the
 SSH adapter below creates the actual independent WAN connections.
 
@@ -69,9 +69,10 @@ The bulk path preserves the earlier compute-to-compute benchmark's mechanism:
    a Unix socket. Both processes reference the same pages; IPC does not copy the
    whole snapshot. This works across container boundaries when the Unix socket
    directory is visible to both; it does not need a shared `/dev/shm` mount.
-3. The sidecar splits the buffer into up to 32 equal contiguous ranges. Persistent
-   TLS connections send `memoryview` slices directly. No per-4-MiB ACK or fsync:
-   each stream sends its entire range before waiting for an ACK.
+3. The sidecar splits the buffer into 4 MiB chunks. Persistent TLS workers take
+   the next chunk from a shared queue, sending `memoryview` slices directly and
+   acknowledging each chunk. Faster links keep working while slower links finish;
+   a failed link returns only its current chunk to the queue. No payload fsync.
 4. The receiver preallocates one exact-size RAM buffer; each stream uses
    `recv_into` on its disjoint slice. After all ranges arrive, it verifies the
    whole-buffer SHA-256 and seals the buffer. Only then is it visible to inference.
@@ -154,7 +155,7 @@ address and its own mailbox on the inference host):
   "mailbox": "/local/scratch/RUN/learner-mailbox",
   "listen": ["0.0.0.0", 19001],
   "peers": [["INFERENCE_HOST_OR_FORWARD", 19002]],
-  "parallel_connections": 32,
+  "parallel_connections": 64,
   "record_connections": 4,
   "chunk_bytes": 4194304,
   "token_file": "/private/expo-link/token",
@@ -171,9 +172,9 @@ certificates outside the repository, with private-file permissions. TLS remains
 enabled through relays. The explicit `allow_plain_loopback` option exists only
 for isolated tests and is rejected for non-loopback listeners/endpoints. Both
 ends must use the same `chunk_bytes` (default 4 MiB) for small-message routing.
-The receiver chooses the bulk range layout: this value is only its minimum
-range size; large messages normally use 32 longer ranges, matching the original
-memory-to-memory test. Never put credentials into tracked JSON.
+The receiver chooses the bulk chunk layout. At most 8,192 chunks are allowed
+per message to bound the missing-index header (default 8 GiB messages need only
+2,048 chunks). Never put credentials into tracked JSON.
 
 If direct compute-to-compute access is unavailable, run
 `python -m expo_ft.distributed.relay --config PATH` on the authorized relay host:
@@ -182,7 +183,7 @@ If direct compute-to-compute access is unavailable, run
 {
   "ssh_config": "/private/ssh/config",
   "ssh_host": "REMOTE_LOGIN",
-  "connections": 32,
+  "connections": 64,
   "listen_host": "127.0.0.1",
   "first_port": 20000,
   "destination": ["REMOTE_COMPUTE", 19002],
@@ -196,11 +197,30 @@ If direct compute-to-compute access is unavailable, run
 ```
 
 Each SSH connection has both `-L` and `-R`: snapshots and transitions can share
-the same 32 persistent SSH/WAN connections in opposite directions. The adapter
+the same 64 persistent SSH/WAN connections in opposite directions. The adapter
 disables SSH multiplexing for these connections, never forwards an agent, and
 cleans up only its own SSH children. It emits `peers` and `reverse_peers`; put
 these lists into the appropriate transport configurations. TCP application
 sockets still exist separately in each direction.
+
+For the measured DeltaAI → scdt → ILIAD route, put this before the host entries
+in the **task-specific** `ssh_config`, so it applies to both the ProxyJump host
+and the final compute host (a command-line `-c` on the final SSH alone does not
+configure the jump process):
+
+```sshconfig
+Host *
+  Ciphers aes128-gcm@openssh.com
+  ControlMaster no
+  ControlPath none
+  ForwardAgent no
+  Compression no
+```
+
+Use 64 distinct `peers` and `reverse_peers` from the relay with 64 bulk workers.
+Leave `IPQoS` unchanged. This is a measured setting for this route; other sites
+can select different connection counts/ciphers through configuration without
+changing the learner or inference code. Do not edit global SSH settings.
 
 The defaults expose forwarded ports only on each relay's loopback. A compute
 host cannot dial another machine's `127.0.0.1`: supply an approved internal
@@ -217,6 +237,13 @@ stable routes, not proof that every link is ready. `first_port` and
 `reverse.first_port` also preserve endpoints across whole-adapter restarts, so
 live RAM transports can reconnect. If endpoints change, restart a fresh session
 with the updated configuration.
+
+The workstation checkout is the source of truth. Commit there, package the source
+with its commit ID and archive SHA-256, and distribute the **same archive** to both
+roles. Extract into a new hash-named directory and bind it read-only into the
+runtime. Include the separately pinned OpenPI revision/archive in provenance;
+the container image alone does not identify application code. Do not patch a
+running remote source directory or assume workstation edits reach remote jobs.
 
 ## Model launch
 
@@ -299,13 +326,13 @@ On an authorized idle test node, with the same actual snapshot used previously:
 
 ```bash
 python tests/distributed/benchmark_transport.py --payload SNAPSHOT.npz \
-  --output NEW_RESULT_DIR --connections 32 --trials 3
+  --output NEW_RESULT_DIR --connections 64 --trials 3
 ```
 
 This starts two TLS sidecars and two independent application processes, loads the
 source once before timing, verifies every reconstructed buffer and releases it.
 It writes only logs/results, not payload files. For an authorized cross-cluster
-comparison, provision the regular transports/32 relays and run the script's
+comparison, provision the regular transports/64 relays and run the script's
 `--role sender --mailbox LOCAL_MAILBOX` and `--role receiver --mailbox LOCAL_MAILBOX`
 on the two test hosts with the same `--session` and `--trials`. Only the sender
 reads `--payload`; the receiver's argument is unused. Do not attach benchmark
@@ -445,3 +472,61 @@ Full evidence, attempt history, persistence-wrapper repair and limitations:
 Remote results are in `split-validation/20260925-wan/` beneath the user's
 ILIAD output and DeltaAI work directories. Test services/credentials were
 cleaned up; parent allocations retained. No commit or push.
+
+### Production WAN chunk scheduling validation (2026-09-26)
+
+Baseline split implementation: `54bce2d`. This change replaces equal per-link
+stripes with dynamically scheduled 4 MiB chunks and defaults to 64 links. On the
+same DeltaAI → scdt → ILIAD route, both SSH layers used AES-128-GCM through the
+task-specific config above; authenticated end-to-end TLS and full SHA-256 checks
+remained enabled. Model, snapshot contents and RAM descriptor handoff are unchanged.
+
+- **39 CPU tests passed**, including more chunks than links, slow-worker load
+  balancing, partial-chunk retry, lost acknowledgments, TLS failures and relay
+  restart isolation.
+- Actual production sidecars transferred the existing 2,017,578,406-byte snapshot
+  five times: receiver times **6.77–8.25 s**, median **7.46 s / 271 MB/s**.
+  Sender-observed transfer through receiver verification: **8.81–9.59 s**.
+- A separate two-transfer run killed three real SSH children during its second
+  transfer: **7.40 s** receive, **8.74 s** through verification. Only those three
+  children restarted; the other 61 retained their PIDs. All seven snapshots
+  matched the original SHA-256; no receiver payload file was written.
+- This validation used CPU-only 2-core/6-GiB steps on each compute node. It did
+  **not rerun GPU updates or policy installation**: the ILIAD GPU was occupied
+  by an existing training step. The full-model follow-up is recorded below.
+
+The timings exclude sender hash/handoff, GPU export/install, SSH startup and the
+benchmark's additional application-level digest. The diagnostic script initially
+used a Python 3.7 subprocess option on the login node's Python 3.6; after fixing
+that helper, fault injection was rerun separately. No production fault was hidden.
+Evidence and exact source archive hash:
+`/scr/kevinon/workspace/expo-ft-split-validation/20260926-production-net/REPORT.md`.
+
+### Full GPU follow-up after the training allocation became idle (2026-09-26)
+
+The same optimized executable source passed recorded-data end-to-end validation
+on ILIAD H200 ×1 and DeltaAI GH200 ×4. Both roles exited successfully: 24 episodes,
+1,186 transitions verified against original record hashes, six actor updates and
+120 critic updates (batch 64 / UTD 20), checkpoint 1186 saved and restored in-process.
+Updated version 1026 was installed with exact GPU parameter/input equality; the
+last 160 transitions were collected using that version. Inputs stayed read-only.
+
+Measured first/steady three-update blocks: **58.11 / 33.17 s**. For the updated
+2.018 GB policy: production export **1.23 s**, sender hash/handoff **0.99 s**,
+receiver transfer **6.66 s**, receiver SHA verification **2.16 s**, and actual
+GPU installation **4.51 s**. The observed update-end → inference-ready span was
+**35.88 s**, including test-only re-export, hashes and action diagnostics. It is
+not a 35.88-second production network or installation measurement.
+
+The strict cross-platform action comparison still differs (maximum selected
+action difference 0.003626, same candidate selected), as in the baseline. This
+does not invalidate exact parameter transfer, but is not numerical action parity
+or a physical-robot success result. This follow-up did not deliberately drop SSH
+links; the separate production fault test above covers that case. Idle TLS
+connections reconnected automatically during the first update interval.
+
+Final output copy to shared storage completed successfully; 1,307 output files
+and their sizes matched node-local results (17,469,107,377 bytes). No independent
+process restored the shared copy. Test steps, listeners and credentials were
+cleaned; the held GPU allocations remain available. Detailed results are under
+`gpu-net-2/` in the evidence paths above.

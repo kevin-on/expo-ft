@@ -149,7 +149,7 @@ if __name__ == '__main__':
     parser.add_argument('--payload', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--trials', type=int, default=3)
-    parser.add_argument('--connections', type=int, default=32)
+    parser.add_argument('--connections', type=int, default=64)
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--session', default='ram-benchmark')
     args = parser.parse_args()

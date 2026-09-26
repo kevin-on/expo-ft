@@ -19,7 +19,7 @@ def forwarding_commands(config):
     """Choose stable endpoints once; every restart reuses the exact command."""
     endpoints, reverse_endpoints, commands = [], [], []
     selected = set()
-    count = config.get('connections', 32)
+    count = config.get('connections', 64)
     if not 1 <= count <= 64:
         raise ValueError('connections must be 1..64')
     for i in range(count):
@@ -107,7 +107,7 @@ def run(config, stop):
             worker.start()
             workers.append(worker)
         # Endpoint identities are available even if some links are still starting.
-        # This file describes routing, not a guarantee that all 32 links are up.
+        # This file describes routing, not a guarantee that every link is up.
         output = Path(config['output'])
         temp = output.with_suffix('.tmp')
         temp.write_text(json.dumps(endpoints, indent=2))

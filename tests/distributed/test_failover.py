@@ -123,9 +123,10 @@ class FailoverTest(unittest.TestCase):
             b.release('policy', 'partial')
             a.wait_sent('policy', 'partial', timeout=8)
         self.assertEqual(len(commits), 2)
-        self.assertEqual(len(counts), 32)
+        # 64 chunks over 32 workers; retries must not resend healthy chunks.
+        self.assertEqual(len(counts), 64)
         self.assertEqual(counts[damaged[0]], 2)
-        self.assertEqual(sum(counts.values()), 33)
+        self.assertEqual(sum(counts.values()), 65)
 
     def test_records_keep_flowing_while_another_rpc_waits(self):
         a, b = self.channels
@@ -185,6 +186,37 @@ class TLSFailoverTest(FailoverTest):
 
 
 class PoolTest(unittest.TestCase):
+    def test_fast_worker_takes_more_chunks_while_slow_worker_waits(self):
+        class Link:
+            def __init__(self, name):
+                self.endpoint = name
+            def close(self):
+                pass
+        entered, release, drained = threading.Event(), threading.Event(), threading.Event()
+        counts = Counter()
+        def send(conn):
+            counts[conn.endpoint] += 1
+            if conn.endpoint == 'slow':
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError('slow link not released')
+            else:
+                if not entered.wait(5):
+                    raise AssertionError('slow link did not start')
+                if counts['fast'] == 12:
+                    drained.set()
+        with TransferPool([Link('slow'), Link('fast')], threading.Event()) as pool:
+            jobs = [pool.submit(send) for _ in range(13)]
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertTrue(drained.wait(5))
+                self.assertFalse(all(job.done() for job in jobs))
+                self.assertEqual(counts['slow'], 1)
+            finally:
+                release.set()
+            for job in jobs:
+                pool.result(job)
+
     def test_repaired_worker_rejoins_while_other_link_continues(self):
         class Link:
             def __init__(self, name):

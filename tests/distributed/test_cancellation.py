@@ -99,4 +99,3 @@ class CancellationTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'closed'):
                 client.create_env({})
         conn.send.assert_not_called()
-

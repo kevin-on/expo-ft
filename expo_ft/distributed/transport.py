@@ -1,6 +1,6 @@
 """RAM-to-RAM transport sidecar; no model, NumPy, JAX or payload disk I/O.
 
-Bulk buffers are split into N contiguous ranges, streamed concurrently over N
+Bulk buffers are split into bounded chunks, dynamically scheduled across
 persistent TLS connections directly into disjoint receiver RAM slices. Local
 applications share those same pages by Unix descriptor passing.
 """
@@ -11,7 +11,6 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import os
 from pathlib import Path
 import queue
@@ -65,10 +64,9 @@ def same_message(first, second):
 
 class Store:
     def __init__(self, chunk_bytes, max_bytes, quota_bytes=16 * 1024**3,
-                 parallel_connections=32, outbox_bytes=8 * 1024**3):
+                 outbox_bytes=8 * 1024**3):
         self.chunk_bytes, self.max_bytes = chunk_bytes, max_bytes
         self.quota_bytes, self.outbox_bytes = quota_bytes, outbox_bytes
-        self.parallel_connections = parallel_connections
         self.lock = threading.RLock()
         self.outbox, self.incoming, self.received, self.sent = {}, {}, {}, {}
         self.rx_bytes = self.tx_bytes = 0
@@ -118,10 +116,14 @@ class Store:
             if ident not in self.incoming:
                 if self.rx_bytes + meta['size'] > self.quota_bytes:
                     raise ValueError('receiver RAM quota exceeded')
-                # As in the WAN benchmark: at most N equally sized contiguous
-                # stripes, not one WAN round trip for every 4 MiB block.
-                stride = max(self.chunk_bytes, math.ceil(meta['size'] / self.parallel_connections))
-                count = math.ceil(meta['size'] / stride)
+                # More chunks than links lets fast workers keep sending while
+                # slower links finish. A failed link retries only its chunk.
+                stride = self.chunk_bytes
+                count = (meta['size'] + stride - 1) // stride
+                # Keep the missing-index response below the 64 KiB header limit,
+                # even when a caller configures very small chunks.
+                if count > 8192:
+                    raise ValueError('too many chunks; increase chunk_bytes')
                 self.incoming[ident] = dict(meta=meta, buffer=Buffer.create(meta['size']),
                     stride=stride, done=set(), locks=[threading.Lock() for _ in range(count)],
                     started=time.monotonic(), timings={})
@@ -139,8 +141,8 @@ class Store:
                 raise ValueError('invalid chunk index')
         offset = index * entry['stride']
         size = min(entry['stride'], entry['meta']['size'] - offset)
-        # Serialize only duplicate writers of the SAME stripe, never the N
-        # independent streams. A failed stream can overwrite its partial stripe.
+        # Serialize only duplicate writers of the SAME chunk, never independent
+        # streams. A failed stream can overwrite its partial chunk.
         with entry['locks'][index]:
             if index in entry['done']:
                 # Drain an overlapping retry without modifying committed bytes.
@@ -360,13 +362,13 @@ class Transport:
         if len(self.token) < 32:
             raise ValueError('use a random token of at least 32 characters')
         chunk_bytes = config.get('chunk_bytes', 4 * 1024**2)
-        count = config.get('parallel_connections', 32)
+        count = config.get('parallel_connections', 64)
         if type(chunk_bytes) is not int or not 1 <= chunk_bytes <= 16 * 1024**2:
             raise ValueError('chunk_bytes must be 1..16 MiB')
         if not 1 <= count <= 64 or not 1 <= config.get('record_connections', 4) <= 64 or not config['peers']:
             raise ValueError('require 1..64 connections and at least one endpoint')
         self.store = Store(chunk_bytes, config.get('max_message_bytes', 8 * 1024**3),
-                           config.get('max_pending_bytes', 16 * 1024**3), count,
+                           config.get('max_pending_bytes', 16 * 1024**3),
                            config.get('max_outbox_bytes', 8 * 1024**3))
         self.stop = threading.Event()
         self.active = set()

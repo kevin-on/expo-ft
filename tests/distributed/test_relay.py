@@ -52,16 +52,16 @@ class RelayTest(unittest.TestCase):
         self.assertEqual(endpoints['peers'], [['127.0.0.1', port]])
         self.assertEqual(len(commands), 1)
 
-    def test_32_ssh_connections_each_carry_both_directions(self):
+    def test_default_64_ssh_connections_each_carry_both_directions(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
-            config = dict(ssh_config='/private/config', ssh_host='remote-login', connections=32,
+            config = dict(ssh_config='/private/config', ssh_host='remote-login',
                 first_port=20000, destination=['remote-compute', 19002],
                 reverse=dict(first_port=21000, destination=['local-compute', 19001]), output=str(path / 'endpoints'))
-            children = [Child() for _ in range(32)]
+            children = [Child() for _ in range(64)]
             probe = MagicMock()
             probe.__enter__.return_value = probe
-            probe.getsockname.side_effect = [('127.0.0.1', 20000+i) for i in range(32)]
+            probe.getsockname.side_effect = [('127.0.0.1', 20000+i) for i in range(64)]
             with patch.object(relay.socket, 'socket', return_value=probe), \
                  patch.object(relay.socket, 'create_connection', return_value=MagicMock()), \
                  patch.object(relay.subprocess, 'Popen', side_effect=children) as popen:
@@ -69,12 +69,12 @@ class RelayTest(unittest.TestCase):
                 worker = threading.Thread(target=relay.run, args=(config, stop))
                 worker.start()
                 try:
-                    wait_until(lambda: (path / 'endpoints').exists() and popen.call_count == 32)
+                    wait_until(lambda: (path / 'endpoints').exists() and popen.call_count == 64)
                 finally:
                     stop.set()
                     worker.join(timeout=5)
                 self.assertFalse(worker.is_alive())
-            self.assertEqual(popen.call_count, 32)
+            self.assertEqual(popen.call_count, 64)
             for call in popen.call_args_list:
                 command = call.args[0]
                 i = int(command[command.index('-L') + 1].split(':')[1]) - 20000
@@ -84,8 +84,8 @@ class RelayTest(unittest.TestCase):
                 self.assertIn('ForwardAgent=no', command)
                 children[i].terminate.assert_called_once()
             result = json.loads((path / 'endpoints').read_text())
-            self.assertEqual(len(result['peers']), 32)
-            self.assertEqual(len(result['reverse_peers']), 32)
+            self.assertEqual(len(result['peers']), 64)
+            self.assertEqual(len(result['reverse_peers']), 64)
 
     def test_only_failed_children_restart_with_identical_forwarding(self):
         with tempfile.TemporaryDirectory() as directory:
