@@ -32,6 +32,7 @@ def get_config():
 
     config.pi05_config_name = "expo_pi05_droid_lora_finetune_sft_cartesian_state"
     config.pi05_resize_size = 224
+    config.pi05_omit_image_keys = ("right_wrist_0_rgb",)
     config.freeze_pi05_encoder = True
     config.freeze_critic_encoder = False  # if True, encoder is frozen for Q (only extract embeddings)
     

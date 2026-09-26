@@ -377,6 +377,12 @@ def build_pi05(config, seed, mesh, data_sharding, replicated_sharding,
     """
     from expo_ft.utils.train_utils import build_pi05_config
     agent_kwargs, pi05_train_config, pi05_resize_size, _ = build_pi05_config(config)
+    omit_image_keys = tuple(agent_kwargs.pop("pi05_omit_image_keys", ()))
+    if omit_image_keys:
+        pi05_train_config = dataclasses.replace(
+            pi05_train_config,
+            model=dataclasses.replace(pi05_train_config.model, omit_image_keys=omit_image_keys),
+        )
     freeze_encoder = agent_kwargs.pop("freeze_pi05_encoder", False)
 
     rng = jax.random.PRNGKey(seed)
