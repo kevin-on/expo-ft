@@ -4,6 +4,9 @@ set -euo pipefail
 source client/.venv/bin/activate
 
 ROBOT_ID=${ROBOT_ID:-0}
+# Optional: ROBOT_ID=0 bash scripts/pick/collect_data.sh --keep-vertical
+# Bounds are always provided by the robot JSON; touching a boundary ends the episode.
+# MP4 defaults to 320x180; HDF5 retains task.image_size.
 case "$ROBOT_ID" in
     0|1) ;;
     *) echo "ROBOT_ID must be 0 or 1" >&2; exit 2 ;;

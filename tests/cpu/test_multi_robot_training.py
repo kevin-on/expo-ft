@@ -106,7 +106,7 @@ def test_mirror_contract_camera_request_and_resume(monkeypatch, tmp_path, make_b
     run(1, False)
     assert collected == [1] and saved == [2]
     for i, request in enumerate(requests):
-        cfg = json.loads((Path(__file__).resolve().parents[2] / f'configs/robots/robot-{i}-sft-eval.json').read_text())
+        cfg = json.loads((Path(__file__).resolve().parents[2] / f'configs/robots/robot-{i}.json').read_text())
         assert request['async_video']
         assert request['expected_camera_views'] == {key: cfg[key] for key in ('side_camera_id', 'wrist_camera_id')}
     ledger = json.loads((tmp_path/'round-2.json').read_text())

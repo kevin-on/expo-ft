@@ -28,7 +28,7 @@ robot_index=int(sys.argv[1])
 space_paths={d.path for d in sm.Enumeration().find() if 'SpaceMouse' in (d.product_string or '')}
 owned=set()
 for i in (0,1):
-    cfg=json.loads(Path(f'configs/robots/robot-{i}-sft-eval.json').read_text())
+    cfg=json.loads(Path(f'configs/robots/robot-{i}.json').read_text())
     serials=set(cfg['camera_serials'])
     if cfg.get('blank_camera_serials') or any(s.startswith('TEMP_') for s in serials):
         raise SystemExit(f'Robot {i}: replace temporary camera mapping before real rollout')
@@ -44,4 +44,4 @@ print(f'Robot {robot_index}: cameras AVAILABLE; both robot mappings and SpaceMou
 PY
 exec client/.venv/bin/python -m client.run_client \
  --host "${EXPO_LEARNER_HOST:-iris6.stanford.edu}" --port "$(( ${EXPO_LEARNER_BASE_PORT:-8102} + robot_index ))" \
- --config-task-path configs/task/pick.py --robot-config "configs/robots/robot-${robot_index}-sft-eval.json"
+ --config-task-path configs/task/pick.py --robot-config "configs/robots/robot-${robot_index}.json"

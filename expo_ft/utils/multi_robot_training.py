@@ -20,7 +20,7 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
     camera_views = [{} for _ in buffers]
     if mirror_robot is not None:
         for index in range(len(buffers)):
-            path = Path(__file__).resolve().parents[2] / f"configs/robots/robot-{index}-sft-eval.json"
+            path = Path(__file__).resolve().parents[2] / f"configs/robots/robot-{index}.json"
             config = json.loads(path.read_text())
             camera_views[index] = {key: config[key] for key in ("side_camera_id", "wrist_camera_id")}
     step, episode_count, pending_steps = start_step, 0, 0

@@ -2,9 +2,13 @@ import json
 import os
 import shutil
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from typing import Dict
 
 import cv2
+import h5py
 import imageio
 import numpy as np
 from absl import app, flags
@@ -12,8 +16,9 @@ from ml_collections import config_flags
 from droid.misc.time import time_ms
 
 from client.real_utils.spacemouse import SpaceMousePolicy
+from client.real_utils.vertical_control import vertical_orientation, vertical_velocity_action
 from client.envs.utils import process_image_for_obs
-from droid.trajectory_utils.trajectory_writer import TrajectoryWriter
+from droid.trajectory_utils.trajectory_writer import write_dict_to_hdf5
 
 FLAGS = flags.FLAGS
 
@@ -44,28 +49,131 @@ flags.DEFINE_bool(
     "Also save the side and wrist right views in HDF5 and MP4 (collection only).",
 )
 flags.DEFINE_bool(
+    "keep_vertical",
+    False,
+    "After each reset, actively keep tool +Z toward base -Z using the post-reset yaw; ignore mouse rotation.",
+)
+flags.DEFINE_alias("keep-vertical", "keep_vertical")
+flags.DEFINE_bool(
     "test_detector",
     False,
     "If True, never return when done; reset env and keep the collection loop running (for testing the detector).",
 )
-# Saved MP4 resolution (width, height); low-res to save disk and encoding time
+# Saved MP4 resolution (width, height); reuse resized HDF5 images.
 flags.DEFINE_integer("video_save_width", 320, "Width of saved MP4 frames.")
 flags.DEFINE_integer("video_save_height", 180, "Height of saved MP4 frames.")
 
 
 def collection_observation(env, raw_obs, save_right_images):
-    """Keep the policy's observation schema intact; add stereo views for storage."""
+    """Save physical left/right lenses even when the policy selects a right view."""
     saved_obs = env.transform_observation(raw_obs)
     if save_right_images:
-        for left_id, output_key in (
-            (env.side_camera_id, "exterior_image_1_right"),
-            (env.wrist_camera_id, "wrist_image_right"),
+        for camera_id, output_prefix in (
+            (env.side_camera_id, "exterior_image_1"),
+            (env.wrist_camera_id, "wrist_image"),
         ):
-            right_id = left_id.rsplit("_", 1)[0] + "_right"
-            saved_obs[output_key] = process_image_for_obs(
-                raw_obs["image"][right_id], bgr_to_rgb=True, image_size=env.image_size,
-            )
+            serial = camera_id.rsplit("_", 1)[0]
+            selected_image = saved_obs[f"{output_prefix}_left"]
+            for eye in ("left", "right"):
+                saved_obs[f"{output_prefix}_{eye}"] = (
+                    selected_image if camera_id == f"{serial}_{eye}" else
+                    process_image_for_obs(raw_obs["image"][f"{serial}_{eye}"],
+                                          bgr_to_rgb=True, image_size=env.image_size)
+                )
+        saved_obs["exterior_image_2_left"] = saved_obs["exterior_image_1_left"]
     return saved_obs
+
+
+class CollectionRecorder:
+    """One ordered worker owns image transforms, HDF5 and MP4 for an episode."""
+
+    def __init__(self, env, filepath, recording_folderpath, save_right_images,
+                 video_size, max_pending=8):
+        if max_pending < 1:
+            raise ValueError("max_pending must be positive")
+        self.env = env
+        self.filepath = filepath
+        self.video_dir = os.path.join(os.path.dirname(recording_folderpath), "recordings", "MP4")
+        self.save_right_images = save_right_images
+        self.video_size = video_size
+        self.max_pending = max_pending
+        self.pending = deque()
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="collect-recorder")
+        self.hdf5 = None
+        self.videos = {}
+        self.error = None
+
+    def check(self):
+        while self.pending and self.pending[0].done():
+            self.pending.popleft().result()
+
+    def submit(self, obs, action):
+        self.check()
+        if len(self.pending) >= self.max_pending:
+            # Backpressure instead of dropping paired samples or growing RAM forever.
+            print("[recording] queue full; waiting for storage worker")
+            self.pending[0].result()
+            self.pending.popleft()
+        # Freeze this step before camera/controller buffers can be reused.
+        obs, action = deepcopy((obs, action))
+        self.pending.append(self.executor.submit(self._write, obs, action))
+
+    def _write(self, obs, action):
+        if self.error is not None:
+            raise self.error
+        try:
+            saved_obs = collection_observation(self.env, obs, self.save_right_images)
+            if self.hdf5 is None:
+                self.hdf5 = h5py.File(self.filepath, "x")
+                os.makedirs(self.video_dir, exist_ok=True)
+                for key, val in saved_obs.items():
+                    if isinstance(val, np.ndarray) and val.ndim == 3 and val.shape[-1] == 3:
+                        self.videos[key] = imageio.get_writer(
+                            os.path.join(self.video_dir, f"{key}.mp4"),
+                            fps=30, format="ffmpeg", codec="libx264", macro_block_size=1,
+                            output_params=["-preset", "ultrafast", "-crf", "28"],
+                        )
+            # Use the existing HDF5 schema/serializer, synchronously in this worker.
+            # No second unbounded writer queue; write failures reach the control loop.
+            write_dict_to_hdf5(self.hdf5, {"saved_observation": saved_obs, "action": action})
+            for key, writer in self.videos.items():
+                frame = np.asarray(saved_obs[key], dtype=np.uint8)
+                if (frame.shape[1], frame.shape[0]) != self.video_size:
+                    frame = cv2.resize(frame, self.video_size, interpolation=cv2.INTER_LINEAR)
+                writer.append_data(frame)
+        except BaseException as exc:
+            self.error = exc
+            raise
+
+    def _close(self, metadata):
+        error = self.error
+        try:
+            if self.hdf5 is not None:
+                for key, value in metadata.items():
+                    self.hdf5.attrs[key] = value
+        except BaseException as exc:
+            error = error or exc
+        finally:
+            for writer in self.videos.values():
+                try:
+                    writer.close()
+                except BaseException as exc:
+                    error = error or exc
+            if self.hdf5 is not None:
+                try:
+                    self.hdf5.close()
+                except BaseException as exc:
+                    error = error or exc
+        if error is not None:
+            raise error
+
+    def close(self, metadata):
+        try:
+            # FIFO executor: every accepted sample finishes before files close/reset.
+            self.executor.submit(self._close, deepcopy(metadata)).result()
+        finally:
+            self.executor.shutdown(wait=True)
+            self.pending.clear()
 
 
 def smallest_missing_id(dir_path: str) -> int:
@@ -87,24 +195,19 @@ def collect_trajectory(
     save_filepath=None,
     recording_folderpath=False,
     test_detector=False,
+    keep_vertical=False,
 ):
     controller.reset_state()
     env.camera_reader.set_trajectory_mode()
 
-    traj_writer = None
-    if save_filepath:
-        traj_writer = TrajectoryWriter(save_filepath, metadata=None, save_images=False)
-
-    # Stream MP4 and HDF5 to avoid holding full episode in memory
-    mp4_writers = {}
-    video_dir = None
+    recorder = None
 
     t_reset0 = time.perf_counter()
     env.reset()
     print("[between-episode] env.reset()={:.2f}s (start of episode)".format(time.perf_counter() - t_reset0))
+    vertical_target = None  # Re-anchor yaw from this episode's post-reset observation.
 
     start_recording = False
-    _episode_success = None
     last_control_start = None
     recorded_steps = 0
     first_recorded_step_time = None
@@ -112,6 +215,8 @@ def collect_trajectory(
 
     try:
         while True:
+            if recorder is not None:
+                recorder.check()
             time_start = time_ms()
             controller_info = controller.get_info()
             control_timestamps = {"step_start": time_ms()}
@@ -120,9 +225,6 @@ def collect_trajectory(
             read_camera_start = time_ms()
             obs = env.get_raw_observation()
             read_camera_end = time_ms()
-            t_before_transform = time_ms()
-            saved_obs = collection_observation(env, obs, FLAGS.save_right_images)
-            t_after_transform = time_ms()
             done, success, _, _ = env.get_info_for_step(obs)
             t_after_obs = time_ms()
 
@@ -132,7 +234,6 @@ def collect_trajectory(
                 if test_detector:
                     print(f"Done (success={success}); test_detector=True")
                     continue
-                _episode_success = success
                 result = {
                     "success": success,
                     "failure": not success,
@@ -144,6 +245,12 @@ def collect_trajectory(
 
             control_timestamps["policy_start"] = time_ms()
             action, controller_action_info = controller.forward(obs, include_info=True)
+            if keep_vertical:
+                orientation = obs["robot_state"]["cartesian_position"][3:6]
+                if vertical_target is None:
+                    vertical_target = vertical_orientation(orientation)
+                    print(f"[keep-vertical] target RPY [rad]: {vertical_target.tolist()}")
+                action = vertical_velocity_action(action, orientation, vertical_target)
 
             control_timestamps["sleep_start"] = time_ms()
             if last_control_start is None:
@@ -166,9 +273,6 @@ def collect_trajectory(
 
             obs["timestamp"]["control"] = control_timestamps
 
-            # HDF5: saved_observation + action only (smaller files; training ignores raw observation).
-            timestep = {"saved_observation": saved_obs, "action": action_info}
-
             # Before the write below, so the step that opens the writers is itself saved.
             if (not start_recording) and controller_info.get("movement_enabled", False) and recording_folderpath:
                 # SVO recording intentionally disabled: the MP4 writers below already
@@ -176,33 +280,19 @@ def collect_trajectory(
                 # grab() also H.265-encode+write the full frame inline (~10-14ms added
                 # to read_camera). We keep only the MP4 stream.
                 start_recording = True
-                video_dir = os.path.join(os.path.dirname(recording_folderpath), "recordings", "MP4")
-                os.makedirs(video_dir, exist_ok=True)
-                # Open MP4 writers and stream frames (no in-memory buffer)
-                for key, val in saved_obs.items():
-                    if isinstance(val, np.ndarray) and val.ndim == 3 and val.shape[-1] == 3:
-                        out_path = os.path.join(video_dir, f"{key}.mp4")
-                        mp4_writers[key] = imageio.get_writer(
-                            out_path, fps=30, format="ffmpeg", codec="libx264",
-                            macro_block_size=1,  # Keep 320x180; do not resize to a multiple of 16.
-                            output_params=["-preset", "ultrafast", "-crf", "28"],
-                        )
-                print("start recording (streaming traj + MP4; low memory)")
+                if save_filepath:
+                    recorder = CollectionRecorder(
+                        env, save_filepath, recording_folderpath, FLAGS.save_right_images,
+                        (FLAGS.video_save_width, FLAGS.video_save_height),
+                    )
+                print("start recording (async image transform + HDF5 + MP4)")
 
-            if traj_writer is not None and start_recording:
-                traj_writer.write_timestep(timestep)
+            if recorder is not None and start_recording:
+                recorder.submit(obs, action_info)
                 recorded_steps += 1
                 if first_recorded_step_time is None:
                     first_recorded_step_time = recorded_step_time
                 last_recorded_step_time = recorded_step_time
-                vid_size = (FLAGS.video_save_width, FLAGS.video_save_height)
-                for key in mp4_writers:
-                    f = np.asarray(saved_obs[key], dtype=np.uint8)
-                    if f.ndim == 2:
-                        f = np.stack([f, f, f], axis=-1)
-                    if (f.shape[1], f.shape[0]) != vid_size:
-                        f = cv2.resize(f, vid_size, interpolation=cv2.INTER_LINEAR)
-                    mp4_writers[key].append_data(f)
 
             t_after_timestep = time_ms()
 
@@ -213,13 +303,11 @@ def collect_trajectory(
                 "timing ms:",
                 "controller=", t_after_controller - time_start,
                 "read_camera=", read_camera_end - read_camera_start,
-                "transform_obs=", t_after_transform - t_before_transform,
-                "get_info=", t_after_obs - t_after_transform,
-                "transform_get_info_total=", t_after_obs - read_camera_end,
+                "get_info=", t_after_obs - read_camera_end,
                 "policy=", ts["sleep_start"] - ts["policy_start"],
                 "sleep=", ts["control_start"] - ts["sleep_start"],
                 "env_step=", ts["step_end"] - ts["control_start"],
-                "record=", t_after_timestep - ts["step_end"],
+                "record_enqueue=", t_after_timestep - ts["step_end"],
                 "timestep_append=", time_end - t_after_timestep,
                 "| total=", time_end - time_start,
             )
@@ -233,6 +321,7 @@ def collect_trajectory(
             (recorded_steps - 1) / recorded_duration_s if recorded_duration_s > 0 else float("nan")
         )
         timing_metadata = {
+            "keep_vertical": keep_vertical,
             "recorded_steps": recorded_steps,
             "recorded_duration_s": recorded_duration_s,
             "recorded_fps": recorded_fps,
@@ -242,38 +331,11 @@ def collect_trajectory(
             f"first_to_last_s={recorded_duration_s:.3f} avg_hz={recorded_fps:.3f}"
         )
         t0 = time.perf_counter()
-        # SVO recording is disabled (see start block above), so nothing to stop here.
-        t_stop_rec = time.perf_counter()
-
-        for key, writer in mp4_writers.items():
-            try:
-                writer.close()
-            except Exception:
-                pass
-
-        if _episode_success is False:
-            if traj_writer is not None:
-                try:
-                    traj_writer.close(metadata=timing_metadata)
-                except Exception:
-                    pass
-            print("[between-episode] stop_recording={:.2f}s (failure — skipped hdf5 flush)".format(
-                t_stop_rec - t0))
-        else:
-            t_mp4 = time.perf_counter()
-            try:
-                if traj_writer is not None:
-                    metadata = dict(controller_info) if "controller_info" in locals() else {}
-                    metadata.update(timing_metadata)
-                    traj_writer.close(metadata=metadata)
-            except Exception as e:
-                print("Warning: traj_writer close error:", e)
-            t_hdf5 = time.perf_counter()
-            print(
-                "[between-episode] stop_recording={:.2f}s close_mp4={:.2f}s close_hdf5={:.2f}s total={:.2f}s".format(
-                    t_stop_rec - t0, t_mp4 - t_stop_rec, t_hdf5 - t_mp4, t_hdf5 - t0
-                )
-            )
+        if recorder is not None:
+            metadata = dict(controller_info) if "controller_info" in locals() else {}
+            metadata.update(timing_metadata)
+            recorder.close(metadata)
+        print("[between-episode] drain_and_close_recording={:.2f}s".format(time.perf_counter() - t0))
 
 def run_and_route_one(env, controller, base_dir) -> Dict[str, object]:
     tmp_root = os.path.join(base_dir, "tmp")
@@ -296,6 +358,7 @@ def run_and_route_one(env, controller, base_dir) -> Dict[str, object]:
         save_filepath=save_filepath,
         recording_folderpath=images_dir,
         test_detector=FLAGS.test_detector,
+        keep_vertical=FLAGS.keep_vertical,
     )
 
     success = result.get("success", False)
@@ -327,6 +390,9 @@ def run_and_route_one(env, controller, base_dir) -> Dict[str, object]:
 
 
 def main(_):
+    width, height = FLAGS.video_save_width, FLAGS.video_save_height
+    if width <= 0 or height <= 0:
+        raise ValueError("video_save_width/height must both be positive")
     task_config = FLAGS.task_config
     if FLAGS.robot_config:
         with open(FLAGS.robot_config) as file:
@@ -377,6 +443,7 @@ def main(_):
             save_filepath=None,
             recording_folderpath=False,
             test_detector=True,
+            keep_vertical=FLAGS.keep_vertical,
         )
         return
 

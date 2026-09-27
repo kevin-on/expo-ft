@@ -1,9 +1,11 @@
-"""SpaceMouse teleoperation without cameras, recording, detection, or reset."""
+"""SpaceMouse teleoperation without cameras, recording, or detection; optional manual joint reset."""
 
 import argparse
 from contextlib import ExitStack
 import math
 import json
+import os
+import select
 import sys
 import time
 
@@ -35,6 +37,8 @@ def parse_args(argv=None):
     parser.add_argument("--launch-controllers", action="store_true",
                         help="Explicitly start/restart this server's arm and gripper "
                              "controllers; normally reuse the running controllers.")
+    parser.add_argument("--measure-bounds", action="store_true",
+                        help="Display live robot-base XYZ in meters (same coordinates as config.bounds).")
     args = parser.parse_args(argv)
     config = {}
     if args.robot_config:
@@ -54,6 +58,15 @@ def parse_args(argv=None):
                 and not config.get("spacemouse_device_path")
                 and "spacemouse_device_number" not in config):
             parser.error("Robot config requires a SpaceMouse path or number")
+    args.reset_joints = config.get("reset_joints")
+    if args.reset_joints is not None:
+        try:
+            joints = np.asarray(args.reset_joints, dtype=np.float64)
+        except (TypeError, ValueError):
+            parser.error("reset_joints must contain seven finite joint angles in radians")
+        if joints.shape != (7,) or not np.isfinite(joints).all():
+            parser.error("reset_joints must contain seven finite joint angles in radians")
+        args.reset_joints = joints
     if args.nuc_ip is None:
         args.nuc_ip = config.get("robot_server_ip", nuc_ip)
     if args.server_port is None:
@@ -132,9 +145,28 @@ def hold_current_pose(robot):
                          gripper_action_space="position", blocking=False)
 
 
+def print_position(robot):
+    # Exactly the field/axis order used by DroidEnv bounds checks. No mirroring or scaling.
+    state, _ = robot.get_robot_state()
+    xyz = np.asarray(state["cartesian_position"][:3], dtype=np.float64)
+    if xyz.shape != (3,) or not np.isfinite(xyz).all():
+        raise ValueError("Expected finite robot cartesian_position XYZ in meters")
+    print(f"\rX={xyz[0]: .6f}  Y={xyz[1]: .6f}  Z={xyz[2]: .6f}  [m, robot base]", end="", flush=True)
+
+
+def read_reset_request():
+    """Canonical terminal input: r + Enter. Drain queued lines into one request."""
+    if not sys.stdin.isatty() or not select.select([sys.stdin], [], [], 0)[0]:
+        return False
+    return any(line.strip().lower() == b"r"
+               for line in os.read(sys.stdin.fileno(), 4096).splitlines())
+
+
 def teleoperate(robot, device, args):
     active = False
+    await_release = False
     next_send = 0.0
+    next_display = 0.0
     last_report = None
     last_report_at = time.monotonic()
     try:
@@ -147,6 +179,27 @@ def teleoperate(robot, device, args):
                 last_report, last_report_at = state.t, now
             if now >= next_send:
                 action = action_from_state(state, args)
+                reset_requested = read_reset_request()
+                if reset_requested:
+                    if args.reset_joints is None:
+                        print("\nNo reset_joints in this robot JSON; reset not sent.", flush=True)
+                    elif np.any(action) or await_release:
+                        print("\nRelease SpaceMouse, then type r + Enter again.", flush=True)
+                    else:
+                        # A failed/interrupted RPC may already have moved the arm.
+                        active = True
+                        print("\nMoving to configured reset_joints [rad]...", flush=True)
+                        robot.update_joints(args.reset_joints, velocity=False, blocking=True)
+                        active = False
+                        await_release = True
+                        next_send = 0.0
+                        next_display = 0.0
+                        print("Joint reset command returned. Release SpaceMouse to resume.", flush=True)
+                        continue
+                if await_release:
+                    if not np.any(action):
+                        await_release = False
+                    action = np.zeros_like(action)
                 # Do not repeat a cached nonzero axis command after input loss.
                 # Button-only reports may occur only on press/release, so their
                 # held state is not subject to the axis-report timeout.
@@ -160,6 +213,9 @@ def teleoperate(robot, device, args):
                 elif active:
                     hold_current_pose(robot)
                     active = False
+                if args.measure_bounds and now >= next_display:
+                    print_position(robot)
+                    next_display = now + 0.2  # Up to 5 Hz, including while moving.
                 next_send = now + CONTROL_PERIOD
             # Drain HID events promptly without a background thread or busy loop.
             time.sleep(0.001)
@@ -197,7 +253,15 @@ def run(args):
         print("Starting at the current pose; no task workspace bounds are applied.", flush=True)
         print("Move/twist: arm | button 0: close | button 1: open | release: hold", flush=True)
         print("Ctrl+C: hold current pose and exit.", flush=True)
-        teleoperate(robot, device, args)
+        if args.reset_joints is not None:
+            print("Release SpaceMouse, then r + Enter: move arm to this JSON's reset_joints [rad].", flush=True)
+        if args.measure_bounds:
+            print("Live XYZ: robot base frame, meters, same as config.bounds (no robot1 mirror).", flush=True)
+        try:
+            teleoperate(robot, device, args)
+        finally:
+            if args.measure_bounds:
+                print(flush=True)
 
 
 def main(argv=None):

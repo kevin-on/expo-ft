@@ -26,7 +26,7 @@ class MirrorOnlineTests(unittest.TestCase):
         class Env:
             def __init__(self, robot):
                 self.robot = robot
-                self.config = json.loads((ROOT / f"configs/robots/robot-{robot}-sft-eval.json").read_text())
+                self.config = json.loads((ROOT / f"configs/robots/robot-{robot}.json").read_text())
                 self.samples, self.executed, self.commands = [], [], []
             def reset(self):
                 self.index = 0
@@ -87,10 +87,14 @@ class MirrorOnlineTests(unittest.TestCase):
 
     def test_camera_mapping_check_runs_before_hardware_construction(self):
         for robot in (0, 1):
-            correct = json.loads((ROOT / f'configs/robots/robot-{robot}-sft-eval.json').read_text())
+            correct = json.loads((ROOT / f'configs/robots/robot-{robot}.json').read_text())
             expected = {k: correct[k] for k in ('side_camera_id', 'wrist_camera_id')}
             validate_camera_views(correct, expected)
-            old = json.loads((ROOT / f'configs/robots/robot-{robot}.json').read_text())
+            # The shared default config now has the correct stereo mapping.
+            # Deliberately restore the old all-left choice for this negative case.
+            old = dict(correct)
+            field = 'side_camera_id' if robot == 0 else 'wrist_camera_id'
+            old[field] = old[field].rsplit('_', 1)[0] + '_left'
             with self.assertRaisesRegex(ValueError, 'Mirror training requires'):
                 validate_camera_views(old, expected)
         tree = ast.parse((ROOT / 'client/run_client.py').read_text())

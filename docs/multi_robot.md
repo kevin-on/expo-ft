@@ -313,7 +313,9 @@ EXPO_LEARNER_HOST=127.0.0.1 \
 # Run the same command with 1 for the second robot.
 ```
 
-The launcher reuses `robot-{0,1}-sft-eval.json`. The learner checks the selected
+The launcher uses the shared `configs/robots/robot-{0,1}.json` defaults, including
+each robot's measured reset joints and workspace bounds. SFT eval uses the same
+files. The learner checks the selected
 camera IDs through the client before constructing the hardware environment.
 Robot1 observations are reflected before inference; policy actions are reflected
 back before execution; returned executed actions (including physical clipping and

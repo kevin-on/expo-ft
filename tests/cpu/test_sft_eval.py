@@ -26,7 +26,7 @@ class SFTEvalTests(unittest.TestCase):
             with self.subTest(robot=robot):
                 raw = example_step()
                 before = copy.deepcopy(raw)
-                cfg = json.loads((ROOT / f"configs/robots/robot-{robot}-sft-eval.json").read_text())
+                cfg = json.loads((ROOT / f"configs/robots/robot-{robot}.json").read_text())
                 side_eye = cfg["side_camera_id"].rsplit("_", 1)[1]
                 wrist_eye = cfg["wrist_camera_id"].rsplit("_", 1)[1]
                 side = raw["saved_observation"][f"exterior_image_1_{side_eye}"]

@@ -168,7 +168,7 @@ class LocalOverlapTests(unittest.TestCase):
             self.assertEqual(events[-1], ('checkpoint_drained',))
             self.assertTrue(all(r['async_video'] for r in requests))
             for i, request in enumerate(requests):
-                cfg = json.loads((ROOT/f'configs/robots/robot-{i}-sft-eval.json').read_text())
+                cfg = json.loads((ROOT/f'configs/robots/robot-{i}.json').read_text())
                 self.assertEqual(request['expected_camera_views'],
                                  {k: cfg[k] for k in ('side_camera_id', 'wrist_camera_id')})
 

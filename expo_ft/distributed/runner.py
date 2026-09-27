@@ -303,7 +303,7 @@ def run_inference(flags, agent=None, env_factory=None):
                 for robot in range(flags.num_robot):
                     views = {}
                     if mirror_robot is not None:
-                        path = Path(__file__).resolve().parents[2] / f'configs/robots/robot-{robot}-sft-eval.json'
+                        path = Path(__file__).resolve().parents[2] / f'configs/robots/robot-{robot}.json'
                         config = json.loads(path.read_text())
                         views = {k: config[k] for k in ('side_camera_id', 'wrist_camera_id')}
                     request = {'example_action': flags.config_task.example_action, 'env_usage': 'train',

@@ -145,9 +145,11 @@ class TeleopTests(unittest.TestCase):
 
     def test_robot_configs_route_matching_mouse_and_server(self):
         root = Path(teleop.__file__).resolve().parents[1]
-        for index, port, path in ((0, 4242, "/dev/hidraw2"), (1, 4243, "/dev/hidraw0")):
+        for index, port in ((0, 4242), (1, 4243)):
             with self.subTest(robot=index):
-                args = teleop.parse_args(["--robot-config", str(root / f"configs/robots/robot-{index}.json")])
+                config_path = root / f"configs/robots/robot-{index}.json"
+                path = json.loads(config_path.read_text())["spacemouse_device_path"]
+                args = teleop.parse_args(["--robot-config", str(config_path)])
                 with patch.object(teleop, "open_spacemouse") as mouse, \
                      patch.object(teleop, "ServerInterface", return_value=self.robot) as interface, \
                      patch.object(teleop, "teleoperate"), redirect_stdout(io.StringIO()):
