@@ -1,6 +1,7 @@
 """Synchronous robot rounds for the existing EXPO learner."""
 import json
 import logging
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import jax
@@ -49,6 +50,7 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
             "example_action": flags.config_task.example_action,
             "env_usage": "train", "video_dir": str(Path(video_dir) / f"robot-{index}"),
             "expected_camera_views": camera_views[index],
+            "async_video": True,
         }, host=flags.client_host, port=flags.client_port + index,
         recover=False, lazy=True,
     ) for index in range(len(buffers))]
@@ -67,11 +69,34 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
         (checkpoint_dir / f"round-{step}.json").write_text(json.dumps(state))
         save_checkpoint(checkpoint_manager, agent, step)
 
+    reset_workers = ThreadPoolExecutor(max_workers=len(envs), thread_name_prefix="robot-reset")
+    resets = []
+
+    def begin_resets():
+        logging.info("Local: resetting %d robots before the next round", len(envs))
+        return [reset_workers.submit(env.reset_only) for env in envs]
+
+    def check_reset_errors():
+        for reset in resets:
+            if reset.done():
+                reset.result()
+
+    def finish_resets():
+        pending = set(resets)
+        while pending:
+            done, pending = wait(pending, timeout=.1, return_when=FIRST_COMPLETED)
+            for reset in done:
+                reset.result()
+
     last_checkpoint = start_step
     try:
+        if step < flags.max_steps:
+            resets = begin_resets()
         while step < flags.max_steps:
+            finish_resets()
+            resets = []
             episodes = collect_round(envs, sample_actions, flags.replan_steps, flags.config_task.control_hz,
-                                     mirror_robot=mirror_robot)
+                                     mirror_robot=mirror_robot, reset_done=True)
             round_steps = sum(len(transitions) for transitions, _ in episodes)
             metrics = {}
             for index, (buffer, (transitions, success)) in enumerate(zip(buffers, episodes)):
@@ -86,15 +111,25 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
                 metrics[f"robot-{index}/episode_length"] = len(transitions)
                 metrics[f"robot-{index}/return"] = sum(t["rewards"] for t in transitions)
 
+            # All robots' records are saved/inserted before allowing their next reset.
+            # Reset workers only perform RPCs; the caller exclusively owns the model.
+            if step < flags.max_steps:
+                resets = begin_resets()
+
             count, pending_steps = updates_for_round(
                 pending_steps, round_steps, can_update=episode_count >= 10 * len(buffers) and step >= flags.batch_size,
                 num_updates=flags.num_updates, step_interval=flags.step_interval,
             )
             for _ in range(count):
+                check_reset_errors()
                 batch, actor_batch, combine_rng = batch_processor.next_batch(combine_rng)
                 agent = agent.replace(rng=jax.device_put(agent.rng, replicated_sharding))
                 agent, update_info = agent.update(agent, batch, flags.utd_ratio, actor_batch)
                 metrics.update({f"training/{key}": value for key, value in update_info.items()})
+            if count:
+                # JAX dispatch is asynchronous: finish updates before the next observation.
+                jax.block_until_ready(agent)
+            check_reset_errors()
             episode_count += len(episodes)
             metrics.update(episodes=episode_count, updates=count, round_steps=round_steps)
             wandb.log(metrics, step=step)
@@ -105,6 +140,15 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
         if flags.checkpoint_model and step != last_checkpoint:
             checkpoint()
     finally:
+        for reset in resets:
+            reset.cancel()
+        # Close RPCs before joining: an unfinished reset may be waiting for a client.
         for env in envs:
-            env.close()
-        checkpoint_manager.wait_until_finished()
+            try:
+                env.close()
+            except Exception:
+                logging.exception("Could not close robot client")
+        try:
+            reset_workers.shutdown(wait=True)
+        finally:
+            checkpoint_manager.wait_until_finished()

@@ -8,14 +8,24 @@ from expo_ft.utils import multi_robot_training as training
 from test_robot_round import FakeEnv
 
 
+class DeferredEnv(FakeEnv):
+    def reset_only(self):
+        # No observation until start_episode; episode bookkeeping lives in reset().
+        pass
+
+    def start_episode(self):
+        return self.reset()
+
+
 @pytest.mark.parametrize("num_updates,expected_updates", [(3, 6), (0, 2)])
 def test_training_driver_barrier_warmup_and_new_policy(monkeypatch, tmp_path, make_buffer,
                                                       num_updates, expected_updates):
-    envs = [FakeEnv(3, 0), FakeEnv(5, 1)]
+    envs = [DeferredEnv(3, 0), DeferredEnv(5, 1)]
     monkeypatch.setattr(training, "EnvClientWrapper", lambda **kw: envs[kw["port"] - 8102])
     logs, checkpoints, update_versions = [], [], []
     monkeypatch.setattr(training.wandb, "log", lambda metrics, step: logs.append((step, dict(metrics))))
     buffers = [make_buffer(1), make_buffer(2)]
+    monkeypatch.setattr(training.jax, "block_until_ready", lambda agent: agent)
     class Agent:
         rng = jax.random.PRNGKey(1)
         version = 0
@@ -32,7 +42,7 @@ def test_training_driver_barrier_warmup_and_new_policy(monkeypatch, tmp_path, ma
             self.version += 1
             update_versions.append(self.version)
             return self, {"loss": 0.1}
-    flags = SimpleNamespace(seed=1, max_steps=56, replan_steps=2, client_host="localhost", client_port=8102,
+    flags = SimpleNamespace(seed=1, max_steps=96, replan_steps=2, client_host="localhost", client_port=8102,
                             config_task=SimpleNamespace(example_action=np.zeros(2), control_hz=10000),
                             num_updates=num_updates, step_interval=8, batch_size=4, utd_ratio=1,
                             checkpoint_buffer=True, checkpoint_model=True, checkpoint_interval=0)
@@ -42,27 +52,27 @@ def test_training_driver_barrier_warmup_and_new_policy(monkeypatch, tmp_path, ma
     training.train_multi_robot(flags, agent, buffers, processor, manager, tmp_path, tmp_path / "video",
                                lambda manager, agent, step: checkpoints.append(step), 0, False, None)
     assert len(update_versions) == expected_updates
-    assert [metrics["updates"] for _, metrics in logs[:5]] == [0] * 5
-    assert all(np.all(action == 0) for env in envs for episode in env.episodes[:6] for action in episode)
+    assert [metrics["updates"] for _, metrics in logs[:10]] == [0] * 10
+    assert all(np.all(action == 0) for env in envs for episode in env.episodes[:11] for action in episode)
     first_update_count = 3 if num_updates else 1
-    assert all(np.all(action == first_update_count) for env in envs for action in env.episodes[6])
-    assert checkpoints == [56]
-    assert (tmp_path / "round-56.json").exists()
+    assert all(np.all(action == first_update_count) for env in envs for action in env.episodes[11])
+    assert checkpoints == [96]
+    assert (tmp_path / "round-96.json").exists()
     assert all(env.closed for env in envs)
 
     # Restore uses the checkpoint's cutoff and keeps each robot's episode history.
-    abandoned = tmp_path / "robot-0/buffers/000000000057.pkl"
+    abandoned = tmp_path / "robot-0/buffers/000000000097.pkl"
     abandoned.write_bytes(b"an unfinished round after the last checkpoint")
     restored = [make_buffer(1), make_buffer(2)]
     training.train_multi_robot(flags, agent, restored, processor, manager, tmp_path, tmp_path / "video",
-                               lambda *_: None, 56, True, None)
-    assert [len(buffer) for buffer in restored] == [21, 35]
-    assert all(buffer.count_episodes_chronological() == 7 for buffer in restored)
+                               lambda *_: None, 96, True, None)
+    assert [len(buffer) for buffer in restored] == [36, 60]
+    assert all(buffer.count_episodes_chronological() == 12 for buffer in restored)
     assert not abandoned.exists()
     next((tmp_path / "robot-0/buffers").glob("*.pkl")).unlink()
     with pytest.raises(ValueError, match="incomplete robot replay"):
         training.train_multi_robot(flags, agent, [make_buffer(1), make_buffer(2)], processor, manager,
-                                   tmp_path, tmp_path / "video", lambda *_: None, 56, True, None)
+                                   tmp_path, tmp_path / "video", lambda *_: None, 96, True, None)
 
 
 def test_mirror_contract_camera_request_and_resume(monkeypatch, tmp_path, make_buffer):
@@ -74,10 +84,11 @@ def test_mirror_contract_camera_request_and_resume(monkeypatch, tmp_path, make_b
     requests, saved, collected = [], [], []
     def create_env(**kwargs):
         requests.append(kwargs['env_creation_request'])
-        return FakeEnv(1)
+        return DeferredEnv(1)
     monkeypatch.setattr(training, 'EnvClientWrapper', create_env)
     monkeypatch.setattr(training.wandb, 'log', lambda *args, **kwargs: None)
-    def collect(envs, sample, replan_steps, control_hz, mirror_robot=None):
+    def collect(envs, sample, replan_steps, control_hz, mirror_robot=None, *, reset_done=False):
+        assert reset_done
         collected.append(mirror_robot)
         return [([transition(i, 0, done=True, success=True)], True) for i in range(2)]
     monkeypatch.setattr(training, 'collect_round', collect)
@@ -96,6 +107,7 @@ def test_mirror_contract_camera_request_and_resume(monkeypatch, tmp_path, make_b
     assert collected == [1] and saved == [2]
     for i, request in enumerate(requests):
         cfg = json.loads((Path(__file__).resolve().parents[2] / f'configs/robots/robot-{i}-sft-eval.json').read_text())
+        assert request['async_video']
         assert request['expected_camera_views'] == {key: cfg[key] for key in ('side_camera_id', 'wrist_camera_id')}
     ledger = json.loads((tmp_path/'round-2.json').read_text())
     assert ledger['mirror_robot'] == 1

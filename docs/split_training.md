@@ -620,3 +620,13 @@ neither numerical parity nor physical task success is established.
 Both outputs persisted to shared storage, test services/credentials were removed,
 and parent GPU allocations were retained. Exact timing boundaries and evidence:
 `/scr/kevinon/workspace/expo-ft-split-validation/20260926-omit-camera/REPORT.md`.
+
+### Local multi-robot execution
+
+`--split_role=local --num_robot=2` uses the same asynchronous workstation video
+writer and deferred reset RPCs. After both episodes are saved/inserted into replay,
+it starts both resets while the learner updates in the calling thread. Before the
+next rollout it waits for JAX updates and both resets, then reads fresh observations.
+The final round starts no extra reset. Local warmup remains 10 episodes per robot;
+`--split_warmup_episodes` only controls the split learner. No inter-machine policy
+snapshot or transport sidecar is needed in local mode.
