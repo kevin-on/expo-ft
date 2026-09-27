@@ -136,7 +136,7 @@ SSH adapter below creates the actual independent WAN connections.
 The bulk path preserves the earlier compute-to-compute benchmark's mechanism:
 
 1. Serialize the live policy directly into anonymous host RAM (`memfd`). It has
-   no disk pathname; no intermediate ZIP is written into the checkpoint directory.
+   no disk pathname; no intermediate snapshot is written into the checkpoint directory.
 2. Seal the buffer against mutation and pass its descriptor to the sidecar over
    a Unix socket. Both processes reference the same pages; IPC does not copy the
    whole snapshot. This works across container boundaries when the Unix socket
@@ -147,14 +147,22 @@ The bulk path preserves the earlier compute-to-compute benchmark's mechanism:
    a failed link returns only its current chunk to the queue. No payload fsync.
 4. The receiver preallocates one exact-size RAM buffer; each stream uses
    `recv_into` on its disjoint slice. After all ranges arrive, it verifies the
-   whole-buffer SHA-256 and seals the buffer. Only then is it visible to inference.
+   whole-buffer XXH3-128 and seals the buffer. Only then is it visible to inference.
 5. Inference receives a descriptor to those same RAM pages, deserializes and
    installs the complete candidate, waits for GPU readiness, and releases the
    receiver buffer. Frozen base weights stay resident; the snapshot is still
    the trainable actor, encoder, edit actor and target critic, not optimizer state.
 
-The uncompressed ZIP/NPY serialization format is unchanged. Only its backing
-storage and handoff changed. Normal model/replay checkpoints still use persistent
+Snapshots use the versioned `EXPOARR1` layout: a header, 64-byte-aligned C-order
+array bytes, and a JSON manifest containing identity/version, shape/dtype and
+byte ranges. GPU installation views the sealed receiver RAM directly, without
+ZIP/NPY materialization or a second ZIP CRC scan. Transport XXH3 verification
+and parameter identity/shape/dtype checks remain enabled; the receiver does not
+scan parameter values for NaN/Inf. Host views stay alive until asynchronous device
+copies finish, including on failure;
+CPU installation uses owned copies because JAX can retain host buffers there.
+Both peers must run this format; legacy ZIP snapshots are rejected. Persistent
+checkpoint formats are unchanged. Normal model/replay checkpoints still use persistent
 storage; they are not snapshot transport spools.
 
 ### Receipts, bounds and failure behavior

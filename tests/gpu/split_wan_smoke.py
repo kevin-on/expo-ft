@@ -15,7 +15,6 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
-import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -146,13 +145,12 @@ def mock_client(args):
 
 
 def parameter_hash(buffer):
+    from expo_ft.distributed.policy import _read_manifest
     digest = hashlib.sha256()
-    with buffer.open() as stream, zipfile.ZipFile(stream) as archive:
-        for name in archive.namelist():
-            if name != 'manifest.json':
-                with archive.open(name) as source:
-                    for block in iter(lambda: source.read(1024**2), b''):
-                        digest.update(block)
+    with buffer.view() as payload:
+        for item in _read_manifest(payload)['arrays']:
+            digest.update(json.dumps([item[k] for k in ('group', 'path', 'shape', 'dtype')]).encode())
+            digest.update(payload[item['offset']:item['offset'] + item['nbytes']])
     return digest.hexdigest()
 
 
