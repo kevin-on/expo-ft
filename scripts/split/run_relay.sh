@@ -8,7 +8,8 @@ load_profile "$@"
 }
 require_file "$DELTA_RUN/link/relay.json"
 [[ -S "$AGENT_SOCKET" ]] || { echo 'Start the dedicated WS agent forward first' >&2; exit 1; }
-ssh -F "$DELTA_RUN/link/ssh-config" iliad-bench hostname
+timeout --kill-after=5s 30s ssh -F "$DELTA_RUN/link/ssh-config" \
+    -o ConnectTimeout=10 -o ConnectionAttempts=1 iliad-bench hostname
 cd "$DELTA_SHARED_SOURCE"
 python3 -u -m expo_ft.distributed.relay --config "$DELTA_RUN/link/relay.json" \
     2>&1 | tee "$DELTA_RUN/relay.log"

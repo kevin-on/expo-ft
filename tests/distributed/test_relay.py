@@ -56,6 +56,7 @@ class RelayTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             config = dict(ssh_config='/private/config', ssh_host='remote-login',
+                startup_interval=0,
                 first_port=20000, destination=['remote-compute', 19002],
                 reverse=dict(first_port=21000, destination=['local-compute', 19001]), output=str(path / 'endpoints'))
             children = [Child() for _ in range(64)]
@@ -115,11 +116,11 @@ class RelayTest(unittest.TestCase):
                 worker = threading.Thread(target=relay.run, args=(config, stop))
                 worker.start()
                 try:
-                    wait_until(lambda: len(history) == 3 and Path(config['output']).exists())
+                    wait_until(lambda: len(history) == 3 and Path(config['output']).exists(), timeout=15)
                     keys = sorted(history)
                     good = history[keys[2]][0][1]
                     history[keys[1]][0][1].returncode = 255
-                    wait_until(lambda: all(len(history[k]) == 2 for k in keys[:2]))
+                    wait_until(lambda: all(len(history[k]) == 2 for k in keys[:2]), timeout=15)
                     self.assertEqual(len(history[keys[2]]), 1)
                     good.terminate.assert_not_called()
                     self.assertFalse(stop.is_set())
@@ -132,3 +133,78 @@ class RelayTest(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 for entries in history.values():
                     self.assertIsNotNone(entries[-1][1].poll())
+
+    def test_startup_gate_spaces_attempts_and_shares_outage_cooldown(self):
+        stop = MagicMock()
+        stop.is_set.return_value = False
+        now = [100.0]
+        stop.wait.side_effect = lambda seconds: now.__setitem__(0, now[0] + seconds)
+        with patch.object(relay.time, 'monotonic', side_effect=lambda: now[0]), \
+             patch.object(relay.random, 'uniform', side_effect=lambda low, high: low):
+            gate = relay.StartupGate(limit=2, interval=.5)
+            self.assertTrue(gate.acquire(stop))
+            self.assertEqual(now[0], 100)
+            self.assertTrue(gate.acquire(stop))
+            self.assertAlmostEqual(now[0], 100.5)
+            gate.release(failed=True)
+            self.assertTrue(gate.acquire(stop))
+            self.assertAlmostEqual(now[0], 105.5)
+            gate.release(failed=True)
+            self.assertTrue(gate.acquire(stop))
+            self.assertAlmostEqual(now[0], 115.5)
+            gate.release()
+            gate.release()
+            self.assertEqual(gate.failure_delay, 5)
+
+    def test_stop_while_startup_slots_are_full(self):
+        gate = relay.StartupGate(limit=2, interval=0)
+        stop = threading.Event()
+        self.assertTrue(gate.acquire(stop))
+        self.assertTrue(gate.acquire(stop))
+        result = []
+        waiter = threading.Thread(target=lambda: result.append(gate.acquire(stop)))
+        waiter.start()
+        stop.set()
+        waiter.join(timeout=1)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result, [False])
+        gate.release()
+        gate.release()
+
+    def test_startup_limit_is_released_once_tunnels_are_listening(self):
+        stop = threading.Event()
+        children = []
+        probe_ready = threading.Event()
+        def launch(command):
+            child = Child()
+            children.append(child)
+            return child
+        def probe(*args, **kwargs):
+            if not probe_ready.is_set():
+                raise OSError('not listening yet')
+            return MagicMock()
+        gate = relay.StartupGate(limit=2, interval=0)
+        workers = [threading.Thread(target=relay.maintain_tunnel,
+                   args=(['fake-ssh'], '127.0.0.1', 22000+i, stop, gate)) for i in range(4)]
+        with patch.object(relay.subprocess, 'Popen', side_effect=launch), \
+             patch.object(relay.socket, 'create_connection', side_effect=probe):
+            try:
+                for worker in workers:
+                    worker.start()
+                wait_until(lambda: len(children) == 2)
+                time.sleep(.15)
+                self.assertEqual(len(children), 2)
+                probe_ready.set()
+                wait_until(lambda: len(children) == 4)
+                self.assertTrue(all(child.poll() is None for child in children))
+            finally:
+                stop.set()
+                for worker in workers:
+                    worker.join(timeout=2)
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertTrue(all(child.poll() is not None for child in children))
+
+    def test_reject_invalid_startup_settings(self):
+        for limit, interval in [(0, .5), (65, .5), (2, -1), (2, float('nan'))]:
+            with self.assertRaises(ValueError):
+                relay.StartupGate(limit, interval)

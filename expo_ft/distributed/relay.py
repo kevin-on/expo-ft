@@ -3,11 +3,16 @@
 Writes a JSON endpoint list for Transport's `peers` field. Every listener uses
 an independent SSH TCP transport, even if the user's SSH config multiplexes.
 This command never copies keys or changes persistent SSH configuration.
+`startup_concurrency` (default 2) and `startup_interval` (default .5 seconds)
+bound initial connections and reconnects, not the established transport pool.
+Failed handshakes impose a shared cooldown; retries include random jitter.
 """
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
+import random
 import signal
 import socket
 import subprocess
@@ -56,12 +61,59 @@ def forwarding_commands(config):
     return commands, {'peers': endpoints, 'reverse_peers': reverse_endpoints}
 
 
-def maintain_tunnel(command, host, port, stop):
+class StartupGate:
+    """Bound SSH handshakes, including retries, without limiting live tunnels."""
+
+    def __init__(self, limit=2, interval=.5):
+        if not isinstance(limit, int) or not 1 <= limit <= 64:
+            raise ValueError('startup_concurrency must be 1..64')
+        if not math.isfinite(interval) or interval < 0:
+            raise ValueError('startup_interval must be finite and nonnegative')
+        self.slots = threading.BoundedSemaphore(limit)
+        self.lock = threading.Lock()
+        self.interval = interval
+        self.next_start = 0.0
+        self.failure_delay = 5.0
+
+    def acquire(self, stop):
+        while not stop.is_set():
+            if not self.slots.acquire(timeout=.1):
+                continue
+            while not stop.is_set():
+                with self.lock:
+                    remaining = self.next_start - time.monotonic()
+                    if remaining <= 0:
+                        self.next_start = time.monotonic() + self.interval
+                        return True
+                stop.wait(min(remaining, .1))
+            self.slots.release()
+        return False
+
+    def release(self, failed=False):
+        with self.lock:
+            if failed:
+                # A shared cooldown also slows fresh workers during an outage.
+                self.next_start = max(self.next_start, time.monotonic() +
+                                      random.uniform(self.failure_delay, self.failure_delay * 1.5))
+                self.failure_delay = min(30.0, self.failure_delay * 2)
+            else:
+                self.failure_delay = 5.0
+        self.slots.release()
+
+
+def maintain_tunnel(command, host, port, stop, gate):
     """Recover one SSH child; no wait/cleanup here touches another child."""
     delay = 1.0
     while not stop.is_set():
         process = None
+        starting = False
+        retry_delay = random.uniform(delay, delay * 1.5)
         try:
+            if not gate.acquire(stop):
+                break
+            starting = True
+            if stop.is_set():
+                break
             process = subprocess.Popen(command)
             deadline = time.monotonic() + 20
             while not stop.is_set():
@@ -74,16 +126,20 @@ def maintain_tunnel(command, host, port, stop):
                     stop.wait(.1)
             if stop.is_set():
                 break
-            logging.info('SSH relay listening on %s:%s', host, port)
+            gate.release()
+            starting = False
+            logging.info('SSH tunnel listening on %s:%s (destination readiness not checked)', host, port)
             ready = time.monotonic()
             while not stop.wait(.2):
                 if process.poll() is not None:
                     if time.monotonic() - ready >= 30:
                         delay = 1.0
+                    retry_delay = random.uniform(delay, delay * 1.5)
                     raise RuntimeError('SSH relay disconnected')
         except (OSError, RuntimeError) as exc:
             if not stop.is_set():
-                logging.warning('SSH relay %s:%s: %s; retry in %.1fs', host, port, exc, delay)
+                logging.warning('SSH relay %s:%s: %s; retry in %.1fs or after shared startup cooldown',
+                                host, port, exc, retry_delay)
         finally:
             if process is not None:
                 if process.poll() is None:
@@ -93,17 +149,20 @@ def maintain_tunnel(command, host, port, stop):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-        if stop.wait(delay):
+            if starting:
+                gate.release(failed=not stop.is_set())
+        if stop.wait(retry_delay):
             break
         delay = min(30, delay * 2)
 
 
 def run(config, stop):
+    gate = StartupGate(config.get('startup_concurrency', 2), config.get('startup_interval', .5))
     commands, endpoints = forwarding_commands(config)
     workers = []
     try:
         for command, host, port in commands:
-            worker = threading.Thread(target=maintain_tunnel, args=(command, host, port, stop))
+            worker = threading.Thread(target=maintain_tunnel, args=(command, host, port, stop, gate))
             worker.start()
             workers.append(worker)
         # Endpoint identities are available even if some links are still starting.

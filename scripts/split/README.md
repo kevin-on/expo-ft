@@ -69,6 +69,12 @@ Run on the profile's login node (`gh-login03`). It performs one read-only SSH
 hostname check, then starts the existing 64-connection relay supervisor. Keep this
 terminal/tmux pane open. Listen/forward ports are the existing 24101/24102,
 24200–24263 and 24300–24363 convention; only one run may use these ports at a time.
+Start the relay once and reuse it across sequential runs while the compute hosts
+and forwarding ports stay the same. Keep its WS agent running too; restarting
+model/transport roles does not require restarting either. Initial SSH handshakes
+and reconnects default to at most two concurrent attempts, spaced by at least
+0.5 seconds, with a shared cooldown after failures. Established tunnels are
+unaffected by this startup limit.
 
 ## 3. DeltaAI login: learner (another pane)
 
@@ -122,9 +128,11 @@ The legacy environment name `EXPO_LEARNER_HOST` points to **inference** here.
 ## Stop
 
 Stop robot clients first, then Ctrl-C the role commands; their exit handlers stop
-only their own model/transport children. Ctrl-C relay, then Ctrl-C the WS agent
-terminal. Parent held allocations remain allocated and charged. For an unattended
-step, inspect `squeue --steps -j JOB` and terminate only its exact `JOB.STEP`.
+only their own model/transport children. Keep relay and the WS agent running for
+the next run on the same hosts/ports. When finished using that route, Ctrl-C relay,
+then Ctrl-C the WS agent terminal. Parent held allocations remain allocated and
+charged. For an unattended step, inspect `squeue --steps -j JOB` and terminate
+only its exact `JOB.STEP`.
 Do not use `scancel JOB` unless returning the entire allocation is intended.
 Credentials remain in each run's private `link/` directory for explicit cleanup;
 no script recursively deletes outputs/checkpoints or cancels unrelated forwards.
