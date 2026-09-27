@@ -969,6 +969,7 @@ dependencies = [
     { name = "scipy" },
     { name = "tensorflow-probability" },
     { name = "websockets" },
+    { name = "xxhash" },
 ]
 
 [package.metadata]
@@ -983,6 +984,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.11.0" },
     { name = "tensorflow-probability", specifier = ">=0.23.0" },
     { name = "websockets", specifier = "~=13.1" },
+    { name = "xxhash", specifier = ">=3.0.0" },
 ]
 
 [[package]]

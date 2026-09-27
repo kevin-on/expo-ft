@@ -45,20 +45,33 @@ def prepare(args):
         episodes, records, sources = [], [], []
         for path in sorted((args.recordings / 'checkpoints' / f'robot-{robot}' / 'buffers').glob('*.pkl')):
             raw = path.read_bytes()
-            row = pickle.loads(raw)
-            if reference is None:
-                reference = deepcopy(row)
-            records.append(row)
-            sources.append({'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)})
-            if bool(row['dones']):
-                success = bool(row.get('is_success', row['rewards'] > 0))
-                name = f'{len(episodes):03d}.pkl'
-                (destination / name).write_bytes(pickle.dumps(records, protocol=5))
-                episodes.append({'file': f'robot-{robot}/{name}', 'length': len(records), 'success': success,
-                                 'records_sha256': record_hash(records), 'sources': sources})
-                records, sources = [], []
-                if len(episodes) == args.rounds:
-                    break
+            value = pickle.loads(raw)
+            if '-' in path.stem:
+                start, end = map(int, path.stem.split('-'))
+                if (value.get('format') != 'replay-batch-v1' or value.get('start_step') != start
+                        or value.get('end_step') != end or len(value['transitions']) != end - start + 1):
+                    raise ValueError(f'Invalid replay batch: {path}')
+                rows = value['transitions']
+            else:
+                rows = [value]
+            source = {'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
+            for row in rows:
+                if reference is None:
+                    reference = deepcopy(row)
+                records.append(row)
+                if not sources or sources[-1]['path'] != str(path):
+                    sources.append(source)
+                if bool(row['dones']):
+                    success = bool(row.get('is_success', row['rewards'] > 0))
+                    name = f'{len(episodes):03d}.pkl'
+                    (destination / name).write_bytes(pickle.dumps(records, protocol=5))
+                    episodes.append({'file': f'robot-{robot}/{name}', 'length': len(records), 'success': success,
+                                     'records_sha256': record_hash(records), 'sources': sources})
+                    records, sources = [], []
+                    if len(episodes) == args.rounds:
+                        break
+            if len(episodes) == args.rounds:
+                break
         if len(episodes) != args.rounds:
             raise ValueError(f'robot {robot} has only {len(episodes)} complete episodes')
         manifest['robots'].append(episodes)
@@ -257,6 +270,7 @@ def model_role(args):
     config.pi05_assets_dir, config.pi05_asset_id = str(args.assets), args.asset_id
     flags = SimpleNamespace(config=config, config_task=task, seed=42, replan_steps=8, num_robot=2,
         split_session=args.session, split_mailbox=args.mailbox, split_timeout=1800, resume=False,
+        split_warmup_episodes=10,
         client_host='127.0.0.1', client_port=args.port, output_dir=str(args.output), run_name='recorded-wan',
         max_steps=manifest['transitions'], batch_size=64, utd_ratio=20, num_updates=3, step_interval=50,
         checkpoint_model=True, checkpoint_buffer=True, checkpoint_interval=0)
@@ -344,12 +358,25 @@ def model_role(args):
     wandb.init(mode='disabled')
     original_log = wandb.log
     def record_metrics(values, *args_, **kwargs_):
+        with (args.output / 'metrics.jsonl').open('a') as stream:
+            stream.write(json.dumps({'step': kwargs_.get('step'), **values},
+                                    default=lambda value: np.asarray(value).tolist()) + '\n')
         if 'split/update_seconds' in values:
             with (args.output / 'update-timing.jsonl').open('a') as stream:
                 stream.write(json.dumps({'step': kwargs_.get('step'), 'updates': values['updates'],
                     'seconds': values['split/update_seconds']})+'\n')
         return original_log(values, *args_, **kwargs_)
     wandb.log = record_metrics
+    # Measure the actual durable writer separately from transport and replay work.
+    from expo_ft.data import replay_buffer as replay_persistence
+    original_save_batch = replay_persistence.save_replay_buffer_batch
+    def timed_save_batch(path, records, *, start_step):
+        started = time.monotonic()
+        original_save_batch(path, records, start_step=start_step)
+        with (args.output / 'replay-save-timing.jsonl').open('a') as stream:
+            stream.write(json.dumps({'robot': Path(path).name, 'start_step': start_step,
+                                     'records': len(records), 'seconds': time.monotonic()-started})+'\n')
+    replay_persistence.save_replay_buffer_batch = timed_save_batch
     original_export, original_round = runner.export_policy, runner.receive_round
     round_number = 0
     def checked_round(*args_):
@@ -388,11 +415,23 @@ def model_role(args):
     assert int(restored.critic.step) == updates * flags.utd_ratio
     assert round_number == args.rounds
     assert len(set(parameter_hashes)) == len(parameter_hashes)
+    checkpoint_dir = args.output / 'checkpoints'
+    replay_persistence.prepare_robot_replay_resume(checkpoint_dir, up_to_step=manifest['transitions'], num_robot=2)
+    assert not list(checkpoint_dir.rglob('*.records'))
+    for robot in range(2):
+        files = replay_persistence._replay_files(checkpoint_dir / f'robot-{robot}/buffers')
+        assert len(files) == args.rounds
+        for (start, end, path), expected in zip(files, manifest['robots'][robot]):
+            records = replay_persistence._load_replay_file(start, end, path)
+            assert '-' in path.stem and len(records) == expected['length']
+            assert record_hash(records) == expected['records_sha256']
+            assert all(bool(row['is_success']) == expected['success'] for row in records)
     manager.close()
     wandb.finish()
     (args.output / 'learner-passed.json').write_text(json.dumps({'rounds': round_number, 'updates': updates,
         'devices': 4, 'batch_size': 64, 'utd_ratio': 20, 'critic_updates': int(restored.critic.step), 'versions': versions,
-        'transitions': manifest['transitions'], 'records_verified': True, 'checkpoint_restore': True}))
+        'transitions': manifest['transitions'], 'records_verified': True, 'checkpoint_restore': True,
+        'batch_replay_files': args.rounds * 2, 'batch_replay_verified': True, 'duplicate_round_archives': False}))
 
 
 if __name__ == '__main__':

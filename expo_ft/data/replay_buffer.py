@@ -2,6 +2,7 @@ import collections
 import logging
 import os
 import pickle as std_pickle
+import re
 from typing import Any, Dict, Optional, Tuple, Union
 
 import cloudpickle
@@ -660,6 +661,120 @@ def save_replay_buffer_transition(
     os.replace(tmp, fname)
 
 
+def _fsync_directory(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def save_replay_buffer_batch(checkpoint_dir, transitions, *, start_step: int) -> None:
+    """Durably save an ordered robot episode with its original global step IDs."""
+    if jax.process_index() != 0:
+        return
+    if start_step < 1 or not transitions:
+        raise ValueError("Replay batch requires a positive start step and nonempty transitions")
+    end_step = start_step + len(transitions) - 1
+    checkpoint_dir = epath.Path(checkpoint_dir)
+    buffer_dir = checkpoint_dir / "buffers"
+    if not buffer_dir.exists():
+        buffer_dir.mkdir(parents=True, exist_ok=True)
+        # Persist newly created robot/buffers directories as well as the file entry.
+        _fsync_directory(checkpoint_dir.parent)
+        _fsync_directory(checkpoint_dir)
+    path = buffer_dir / f"{start_step:012d}-{end_step:012d}.pkl"
+    temp = epath.Path(str(path) + ".tmp")
+    with temp.open("wb") as f:
+        cloudpickle.dump(dict(format="replay-batch-v1", start_step=start_step,
+                              end_step=end_step, transitions=transitions),
+                         f, protocol=std_pickle.HIGHEST_PROTOCOL)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp, path)
+    _fsync_directory(buffer_dir)
+
+
+def _replay_files(buffer_dir):
+    """Return (start, end, path), accepting legacy files and batch ranges."""
+    files = []
+    for path in epath.Path(buffer_dir).glob("*.pkl"):
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", path.stem)
+        if match is None:
+            raise ValueError(f"Invalid replay filename: {path}")
+        start = int(match[1])
+        end = int(match[2]) if match[2] is not None else start
+        if start < 0 or end < start or (match[2] is not None and start == 0):
+            raise ValueError(f"Invalid replay step range: {path}")
+        files.append((start, end, path))
+    return sorted(files)
+
+
+def _load_replay_file(start, end, path):
+    with path.open("rb") as f:
+        value = cloudpickle.load(f)
+    if "-" not in path.stem:
+        return [value]
+    if (not isinstance(value, dict) or value.get("format") != "replay-batch-v1"
+            or value.get("start_step") != start or value.get("end_step") != end):
+        raise ValueError(f"Replay batch header does not match filename: {path}")
+    records = value.get("transitions")
+    if not isinstance(records, list) or len(records) != end - start + 1:
+        raise ValueError(f"Replay batch record count does not match range: {path}")
+    if not all(isinstance(record, dict) and "actions" in record for record in records):
+        raise ValueError(f"Invalid transition in replay batch: {path}")
+    return records
+
+
+def prepare_robot_replay_resume(checkpoint_dir, *, up_to_step: int, num_robot: int,
+                                abandoned_dir=None) -> None:
+    """Validate a multi-robot checkpoint prefix before removing abandoned tails.
+
+    Both robot drivers checkpoint after complete rounds, hence batch boundaries.
+    Reject an interior-batch cursor before modifying files; the standalone reader
+    still supports arbitrary cutoffs for inspection/single-buffer loading.
+    """
+    if jax.process_index() != 0:
+        return
+    if up_to_step < 0:
+        raise ValueError("Checkpoint step must be nonnegative")
+    root = epath.Path(checkpoint_dir)
+    files = []
+    for robot_dir in root.glob("robot-*"):
+        entries = _replay_files(robot_dir / "buffers")
+        if entries and robot_dir.name not in {f"robot-{i}" for i in range(num_robot)}:
+            raise ValueError(f"Unexpected robot replay directory: {robot_dir}")
+        files.extend(entries)
+    files.sort()
+    expected = 1
+    for start, end, path in files:
+        if start > up_to_step:
+            continue
+        if start != expected:
+            raise ValueError("Cannot resume: incomplete robot replay or duplicate global steps")
+        if end > up_to_step:
+            raise ValueError("Robot checkpoint must end at a replay batch boundary")
+        expected = end + 1
+    if expected != up_to_step + 1:
+        raise ValueError("Cannot resume: incomplete robot replay for this checkpoint")
+    # Catch malformed required batches before moving or deleting any suffix.
+    for start, end, path in files:
+        if start <= up_to_step and "-" in path.stem:
+            _load_replay_file(start, end, path)
+    for start, _, path in files:
+        if start <= up_to_step:
+            continue
+        if abandoned_dir is None:
+            path.unlink()
+        else:
+            destination = epath.Path(abandoned_dir) / path.parent.parent.name / path.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                raise FileExistsError(f"Abandoned replay already exists: {destination}")
+            os.replace(path, destination)
+        _fsync_directory(path.parent)
+
+
 def restore_replay_buffer(
     checkpoint_dir: epath.Path | str,
     replay_buffer: Any,
@@ -677,30 +792,29 @@ def restore_replay_buffer(
     if not buffer_dir.exists():
         return replay_buffer
 
-    if up_to_step is not None:
-        cutoff = int(up_to_step)
-        files = sorted(
-            [p for p in buffer_dir.glob("*.pkl") if p.stem.isdigit() and int(p.stem) <= cutoff],
-            key=lambda p: int(p.stem),
-        )
-    else:
-        files = sorted(
-            [p for p in buffer_dir.glob("*.pkl") if p.stem.isdigit()],
-            key=lambda p: int(p.stem),
-        )
+    files = [entry for entry in _replay_files(buffer_dir)
+             if up_to_step is None or entry[0] <= up_to_step]
+    previous_end = -1
+    for start, end, _ in files:
+        if start <= previous_end:
+            raise ValueError("Overlapping replay files")
+        previous_end = end
 
     inserted = 0
     skipped = 0
-    for p in tqdm.tqdm(files, desc="Loading replay buffer", unit="trans"):
+    for start, end, path in tqdm.tqdm(files, desc="Loading replay buffer", unit="file"):
         if max_transitions is not None and inserted >= max_transitions:
             break
-        with p.open("rb") as f:
-            transition = cloudpickle.load(f)
-        if skip_dummy_actions and "actions" in transition and np.allclose(transition["actions"], -1):
-            skipped += 1
-            continue
-        replay_buffer.insert(transition)
-        inserted += 1
+        for step, transition in enumerate(_load_replay_file(start, end, path), start=start):
+            if up_to_step is not None and step > up_to_step:
+                break
+            if max_transitions is not None and inserted >= max_transitions:
+                break
+            if skip_dummy_actions and "actions" in transition and np.allclose(transition["actions"], -1):
+                skipped += 1
+                continue
+            replay_buffer.insert(transition)
+            inserted += 1
     if skipped > 0:
         logging.info("Skipped %d dummy (action=-1) transitions during replay buffer restore.", skipped)
 

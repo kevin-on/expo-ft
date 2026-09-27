@@ -15,7 +15,7 @@ import numpy as np
 
 from .channel import Channel, atomic_json
 from .policy import export_policy, import_policy, identity
-from .protocol import key, receive_round, save_round, task_contract
+from .protocol import key, receive_round, task_contract
 
 
 def _channel(flags):
@@ -43,7 +43,9 @@ def _abort(channel, session):
 def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, checkpoint_dir,
                 save_checkpoint, start_step, resuming, replicated_sharding, mirror_robot):
     import wandb
-    from expo_ft.data.replay_buffer import restore_replay_buffer, save_replay_buffer_transition
+    from expo_ft.data.replay_buffer import (
+        prepare_robot_replay_resume, restore_replay_buffer, save_replay_buffer_batch,
+    )
     from expo_ft.utils.robot_round import updates_for_round
 
     directory = Path(checkpoint_dir)
@@ -62,15 +64,8 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
         episode_count, pending_steps = state['episode_count'], state['pending_steps']
         combine_rng = jax.device_put(np.asarray(state['combine_rng'], dtype=np.uint32), replicated_sharding)
         inference_rng = state['inference_rng']
-        records = list(directory.glob('robot-*/buffers/*.pkl'))
-        if sorted(int(p.stem) for p in records if int(p.stem) <= step) != list(range(1, step + 1)):
-            raise ValueError('Cannot resume: incomplete or duplicate replay records')
-        # Preserve abandoned records for inspection, outside the restored cursor.
-        for path in records:
-            if int(path.stem) > step:
-                dest = directory / 'abandoned-replay' / session / path.parent.parent.name / path.name
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                path.rename(dest)
+        prepare_robot_replay_resume(directory, up_to_step=step, num_robot=len(buffers),
+                                   abandoned_dir=directory / 'abandoned-replay' / session)
         for index, buffer in enumerate(buffers):
             # These are executed actions, so an all-minus-one command is not a dummy.
             restore_replay_buffer(directory / f'robot-{index}', buffer, up_to_step=start_step,
@@ -120,9 +115,17 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             if finished['version'] != version:
                 raise ValueError('round completion version mismatch')
             inference_rng = finished['inference_rng']
-            save_round(directory / 'received-rounds' / session / f'{round_id}.records', episodes,
-                       {'session': session, 'round': round_id, 'version': version, 'identity': contract})
-            # Full round is durable now. Transport receipts are kept for deduplication.
+            # Persist both episodes before releasing transport buffers or admitting
+            # the round to replay. A failed save cannot permit reset/update.
+            next_step = step + 1
+            for robot, (records, success) in enumerate(episodes):
+                for record in records:
+                    record['is_success'] = success
+                if flags.checkpoint_buffer:
+                    save_replay_buffer_batch(directory / f'robot-{robot}', records, start_step=next_step)
+                next_step += len(records)
+            # Small transport receipts remain for deduplication. With replay
+            # checkpointing disabled, persistence is deliberately skipped.
             for robot, (records, _) in enumerate(episodes):
                 for index in range(len(records)):
                     channel.release('transition', key(session, round_id, robot, index))
@@ -133,11 +136,8 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             round_steps = sum(len(records) for records, _ in episodes)
             for robot, (buffer, (records, success)) in enumerate(zip(buffers, episodes)):
                 for record in records:
-                    record['is_success'] = success
                     buffer.insert(record)
                     step += 1
-                    if flags.checkpoint_buffer:
-                        save_replay_buffer_transition(directory / f'robot-{robot}', record, step=step)
                 metrics[f'robot-{robot}/success'] = float(success)
                 metrics[f'robot-{robot}/episode_length'] = len(records)
                 metrics[f'robot-{robot}/return'] = sum(float(r['rewards']) for r in records)

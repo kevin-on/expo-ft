@@ -165,7 +165,7 @@ class Channel:
         """Share sealed pages with the sidecar, with no full-payload IPC copy."""
         buffer.seal()
         meta = dict(id=message_id(topic, key), topic=topic, key=key, size=buffer.size,
-                    sha256=buffer.digest(), created=time.time())
+                    xxh3_128=buffer.digest(), created=time.time())
         self._rpc('publish', fd=buffer.fd, meta=meta)
 
     def flush(self):

@@ -8,7 +8,9 @@ import jax
 import numpy as np
 import wandb
 
-from expo_ft.data.replay_buffer import restore_replay_buffer, save_replay_buffer_transition
+from expo_ft.data.replay_buffer import (
+    prepare_robot_replay_resume, restore_replay_buffer, save_replay_buffer_batch,
+)
 from expo_ft.env.env_client import EnvClientWrapper
 from expo_ft.utils.robot_round import collect_round, updates_for_round
 
@@ -33,14 +35,7 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
             raise ValueError("Resume requires the same live robot mirror convention")
         episode_count, pending_steps = state["episode_count"], state["pending_steps"]
         combine_rng = np.asarray(state["combine_rng"], dtype=np.uint32)
-        records = list(checkpoint_dir.glob("robot-*/buffers/*.pkl"))
-        if sum(int(path.stem) <= step for path in records) != step:
-            raise ValueError("Cannot resume: incomplete robot replay records for this checkpoint")
-        # Discard the abandoned suffix before assigning new global step numbers;
-        # robot episode lengths (and therefore their step ranges) may change.
-        for path in records:
-            if int(path.stem) > step:
-                path.unlink()
+        prepare_robot_replay_resume(checkpoint_dir, up_to_step=step, num_robot=len(buffers))
         for index, buffer in enumerate(buffers):
             restore_replay_buffer(checkpoint_dir / f"robot-{index}", buffer, up_to_step=step)
             buffer.restore_success_marks()
@@ -99,14 +94,18 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
                                      mirror_robot=mirror_robot, reset_done=True)
             round_steps = sum(len(transitions) for transitions, _ in episodes)
             metrics = {}
+            next_step = step + 1
+            for index, (transitions, success) in enumerate(episodes):
+                for transition in transitions:
+                    transition["is_success"] = bool(success)
+                if flags.checkpoint_buffer:
+                    save_replay_buffer_batch(checkpoint_dir / f"robot-{index}", transitions,
+                                             start_step=next_step)
+                next_step += len(transitions)
             for index, (buffer, (transitions, success)) in enumerate(zip(buffers, episodes)):
                 for transition in transitions:
-                    # Mark before inserting/saving; no episode can mark another robot's rows.
-                    transition["is_success"] = bool(success)
                     buffer.insert(transition)
                     step += 1
-                    if flags.checkpoint_buffer:
-                        save_replay_buffer_transition(checkpoint_dir / f"robot-{index}", transition, step=step)
                 metrics[f"robot-{index}/success"] = float(success)
                 metrics[f"robot-{index}/episode_length"] = len(transitions)
                 metrics[f"robot-{index}/return"] = sum(t["rewards"] for t in transitions)

@@ -35,3 +35,4 @@ treescope
 wandb
 websockets==13.1
 google-crc32c==1.7.1
+xxhash>=3.0.0

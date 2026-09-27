@@ -49,8 +49,9 @@ inference application's existing WS listener is a separate connection.
    At episode end the WS hands its video buffers to a background encoder before
    returning terminal info; normal MP4 encoding no longer delays the last record.
 5. Learner admits only complete, correctly versioned episodes from both robots.
-   It writes one durable received-round archive, then inserts records into replay
-   in the existing robot order. Partial rounds never enter replay or training.
+   With `checkpoint_buffer`, it durably writes one batch pickle per robot episode,
+   then releases the received buffers and inserts records into replay in the
+   existing robot order. Partial rounds never enter replay or training.
 6. Existing warmup and update rules are retained: the current multi-robot loop
    waits for 10 completed rounds before an update-capable round; `num_updates=3`
    means three calls **per round**, with each call's UTD unchanged. Zero derives
@@ -153,8 +154,8 @@ The bulk path preserves the earlier compute-to-compute benchmark's mechanism:
    the trainable actor, encoder, edit actor and target critic, not optimizer state.
 
 The uncompressed ZIP/NPY serialization format is unchanged. Only its backing
-storage and handoff changed. Normal model/replay checkpoints and accepted round
-archives still use persistent storage; they are not snapshot transport spools.
+storage and handoff changed. Normal model/replay checkpoints still use persistent
+storage; they are not snapshot transport spools.
 
 ### Receipts, bounds and failure behavior
 
@@ -185,14 +186,32 @@ archives still use persistent storage; they are not snapshot transport spools.
 - `mailbox`/`--split_mailbox` now names only a directory for the local Unix socket,
   locks and tiny diagnostic/session markers. Keep it node-local, private, short
   enough for a Unix socket path, and shared between the app and its sidecar.
-- At a complete round, `received-rounds/SESSION/ROUND.records` is persisted before
-  replay admission and transition buffer release. Existing checkpoint/replay cursor
-  recovery semantics are unchanged. Use `--resume --checkpoint_buffer` with the
-  matching run and a fresh session; missing replay is an error and abandoned replay
-  suffixes are moved aside, not silently trained after restart.
+- With `--checkpoint_buffer`, each complete robot episode is saved once as
+  `robot-N/buffers/START-END.pkl` (12-digit global steps). The ordered raw
+  transitions, including `is_success`, are unchanged. Both episode files are
+  flushed/fsynced and atomically published before transport release, replay
+  admission, reset permission, updates or checkpoint publication. No duplicate
+  `received-rounds/*.records` archive is written; existing archives are left alone.
+  Without `checkpoint_buffer`, transitions are kept in memory only.
+- Resume accepts legacy per-transition `STEP.pkl` files, batch files, or a
+  non-overlapping mixture. It checks that global steps through the checkpoint
+  are present exactly once, then restores each robot in chronological order.
+  Both split and local multi-robot checkpoints occur after complete rounds and
+  therefore at batch boundaries; an interior-batch checkpoint is rejected before
+  file cleanup. The lower-level replay reader supports partial batch cutoffs.
+  Use `--resume --checkpoint_buffer` with the matching run and a fresh session;
+  abandoned split replay suffixes are moved aside, not silently trained after
+  restart. Model/optimizer and split checkpoint-ledger formats are unchanged.
 - Backpressure, checksum/configuration failures and peer timeout abort the session.
   Physical commands are never retried by the transport. Do not delete a live
   mailbox or stop unrelated robot processes, listeners, SSH masters or allocations.
+- Payload checksums use **XXH3-128** (`xxhash>=3.0.0`) for both snapshots and small
+  messages; the wire field is `xxh3_128` (32 hexadecimal characters). Both applications
+  and sidecars must use this version together, with a fresh session/mailbox when
+  upgrading from SHA-256 payloads. Legacy payload metadata is rejected. Message IDs
+  and model/normalization fingerprints still use SHA-256. TLS/SSH security is unchanged.
+  This replaces the checksum algorithm only; streaming verification/export is not
+  implemented. DeltaAI hashing was benchmarked; cross-host ILIAD validation is pending.
 
 ### Timing
 

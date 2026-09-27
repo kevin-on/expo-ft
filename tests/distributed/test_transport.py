@@ -8,6 +8,7 @@ import time
 import unittest
 
 import numpy as np
+import xxhash
 
 from expo_ft.distributed.channel import Channel, message_id
 from expo_ft.distributed.buffer import Buffer
@@ -135,11 +136,39 @@ class TLSTransportTest(TransportTest):
 
 
 class ValidationTest(unittest.TestCase):
+    def test_legacy_or_invalid_checksum_metadata_rejected(self):
+        store = Store(4, 1024)
+        self.addCleanup(store.close)
+        legacy = dict(id=message_id('t', 'k'), topic='t', key='k', size=4, sha256='0' * 64)
+        with self.assertRaisesRegex(ValueError, 'invalid'):
+            store.offer(legacy)
+        for digest in ('0' * 64, 'g' * 32, ''):
+            with self.subTest(digest=digest), self.assertRaisesRegex(ValueError, 'invalid'):
+                store.offer(dict(legacy, xxh3_128=digest))
+        self.assertEqual(store.rx_bytes, 0)
+
+    def test_small_payload_checksum_and_corruption(self):
+        import io
+        class Reader:
+            def __init__(self, data):
+                self.data = io.BytesIO(data)
+            def recv_into(self, view):
+                return self.data.readinto(view)
+        store = Store(16, 1024)
+        self.addCleanup(store.close)
+        meta = dict(id=message_id('t', 'k'), topic='t', key='k', size=4,
+                    xxh3_128=xxhash.xxh3_128(b'good').hexdigest())
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            store.small(Reader(b'bad!'), meta)
+        self.assertNotIn(meta['id'], store.received)
+        store.small(Reader(b'good'), meta)
+        self.assertIn(meta['id'], store.received)
+
     def test_chunk_layout_and_header_bound(self):
         store = Store(4, 100000)
         self.addCleanup(store.close)
         meta = dict(id=message_id('test', 'chunks'), topic='test', key='chunks',
-                    size=257, sha256='0' * 64)
+                    size=257, xxh3_128='0' * 32)
         status = store.offer(meta)
         self.assertEqual(status['chunk_bytes'], 4)
         self.assertEqual(status['missing'], list(range(65)))
@@ -149,23 +178,21 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(store.rx_bytes, 257)
 
     def test_conflicting_and_incomplete_objects(self):
-        import hashlib
         with tempfile.TemporaryDirectory() as directory:
             store = Store(4, 1024)
             self.addCleanup(store.close)
             data = b'12345678'
             meta = {'id': message_id('test', 'key'), 'topic': 'test', 'key': 'key',
-                    'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+                    'size': len(data), 'xxh3_128': xxhash.xxh3_128(data).hexdigest()}
             self.assertEqual(store.offer(meta)['missing'], [0, 1])
             with self.assertRaisesRegex(ValueError, 'incomplete'):
                 store.commit(meta)
             with self.assertRaisesRegex(ValueError, 'conflicting'):
-                store.offer(dict(meta, sha256='0' * 64))
+                store.offer(dict(meta, xxh3_128='0' * 32))
             with self.assertRaisesRegex(ValueError, 'invalid'):
                 store.offer(dict(meta, id='../../escape'))
 
     def test_partial_range_retry_and_released_dedup(self):
-        import hashlib
         import io
         class Reader:
             def __init__(self, data):
@@ -176,7 +203,7 @@ class ValidationTest(unittest.TestCase):
         self.addCleanup(store.close)
         data = b'abcdefgh'
         meta = dict(id=message_id('test', 'k'), topic='test', key='k', size=len(data),
-                    sha256=hashlib.sha256(data).hexdigest())
+                    xxh3_128=xxhash.xxh3_128(data).hexdigest())
         store.offer(meta)
         with self.assertRaises(EOFError):
             store.chunk(Reader(b'ab'), {'id': meta['id'], 'index': 0})
@@ -191,10 +218,9 @@ class ValidationTest(unittest.TestCase):
         self.assertEqual(store.rx_bytes, 0)
 
     def test_corrupt_buffer_not_admitted(self):
-        import hashlib
         with Buffer.from_bytes(b'abcd') as buffer:
             meta = dict(id=message_id('t', 'k'), topic='t', key='k', size=4,
-                        sha256=hashlib.sha256(b'good').hexdigest())
+                        xxh3_128=xxhash.xxh3_128(b'good').hexdigest())
             store = Store(4, 1024)
             self.addCleanup(store.close)
             store.offer(meta)
@@ -228,7 +254,7 @@ class ValidationTest(unittest.TestCase):
     def test_bad_size_and_quota_rejected_before_read(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(4, 1024, quota_bytes=4)
-            meta = dict(id=message_id('t', 'k'), topic='t', key='k', size=-1, sha256='0'*64)
+            meta = dict(id=message_id('t', 'k'), topic='t', key='k', size=-1, xxh3_128='0'*32)
             with self.assertRaisesRegex(ValueError, 'invalid'):
                 store.small(None, meta)
             with self.assertRaisesRegex(ValueError, 'quota'):

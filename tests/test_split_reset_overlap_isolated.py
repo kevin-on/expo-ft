@@ -94,7 +94,8 @@ class SplitOverlapTests(unittest.TestCase):
             self.assertEqual(records[0]['observations'], {'initial': True, 'mirrored': bool(index)})
 
     def run_pair(self, *, slow_reset=False, fail_reset=False, fail_update=False,
-                 num_robot=2, start_step=0, max_steps=24, warmup=10):
+                 num_robot=2, start_step=0, max_steps=24, warmup=10,
+                 checkpoint_buffer=False, fail_save=False):
         messages = [{}, {}]
         lock = threading.Condition()
         events = []
@@ -107,6 +108,7 @@ class SplitOverlapTests(unittest.TestCase):
         self.test_thread = threading.current_thread()
         test = self
         contract = {'test': 'same identity'}
+        saved = [0] * num_robot
 
         class Peer:
             def __init__(self, index):
@@ -142,6 +144,10 @@ class SplitOverlapTests(unittest.TestCase):
                     raise RuntimeError('peer aborted')
             def release(self, topic, key):
                 with lock:
+                    if checkpoint_buffer and self.index == 0:
+                        round_number = int(key.split('/')[1])
+                        test.assertTrue(all(n > round_number for n in saved))
+                    events.append(('release', self.index, topic, key))
                     messages[self.index].pop((topic, key), None)
             def flush(self):
                 pass
@@ -241,6 +247,14 @@ class SplitOverlapTests(unittest.TestCase):
         def fake_numpy_array(value, **kwargs):
             return Array(value) if isinstance(value, (list, tuple)) else value
 
+        def save_batch(path, records, *, start_step):
+            robot = int(path.name.split('-')[-1])
+            if fail_save and robot == num_robot - 1:
+                raise RuntimeError('save failed')
+            test.assertTrue(all('is_success' in record for record in records))
+            saved[robot] += 1
+            events.append(('saved_batch', robot, start_step, len(records)))
+
         namespace = dict(
             __file__=str(ROOT/'expo_ft/distributed/runner.py'),
             Path=Path, json=json, logging=logging, time=time,
@@ -253,7 +267,8 @@ class SplitOverlapTests(unittest.TestCase):
             key=lambda *parts: '/'.join(map(str, parts)),
             export_policy=lambda agent, contract, version: nullcontext(NS(version=version, size=0)),
             import_policy=import_policy, receive_round=receive_round, collect_round=collect,
-            save_round=lambda *a: events.append(('saved_round',)),
+            save_replay_buffer_batch=save_batch,
+            atomic_json=lambda path, value: events.append(('checkpoint_ledger',)),
             wandb=NS(log=lambda *a, **kw: None), EnvClientWrapper=None,
         )
         load_definitions('expo_ft/utils/robot_round.py', ['updates_for_round'], namespace)
@@ -263,7 +278,7 @@ class SplitOverlapTests(unittest.TestCase):
         flags = dict(seed=1, split_session='test', num_robot=num_robot, client_host='', client_port=8102,
                      output_dir='unused', run_name='test', resume=False, max_steps=max_steps,
                      batch_size=1, split_warmup_episodes=warmup, num_updates=3, step_interval=1, utd_ratio=20, replan_steps=8,
-                     checkpoint_buffer=False, checkpoint_model=False, checkpoint_interval=2000,
+                     checkpoint_buffer=checkpoint_buffer, checkpoint_model=checkpoint_buffer, checkpoint_interval=2000,
                      config_task=NS(example_action=[], control_hz=10))
         learner_flags, inference_flags = NS(role=0, **flags), NS(role=1, **flags)
         learner_agent, inference_agent = Agent(), Agent()
@@ -274,9 +289,10 @@ class SplitOverlapTests(unittest.TestCase):
             try:
                 if role == 0:
                     namespace['run_learner'](learner_flags, learner_agent,
-                        [NS(insert=lambda _: None) for _ in range(num_robot)],
+                        [NS(insert=lambda _: events.append(('insert',))) for _ in range(num_robot)],
                         NS(next_batch=lambda rng: ({}, None, rng)), NS(wait_until_finished=lambda: None),
-                        ROOT, lambda *args: None, start_step, False, None, 1 if num_robot == 2 else None)
+                        ROOT, lambda *args: events.append(('model_checkpoint', args[-1])),
+                        start_step, False, None, 1 if num_robot == 2 else None)
                 else:
                     namespace['run_inference'](inference_flags, inference_agent,
                         env_factory=env_factory)
@@ -289,7 +305,12 @@ class SplitOverlapTests(unittest.TestCase):
             thread.join(4)
         self.assertTrue(all(not t.is_alive() for t in threads), 'role did not exit')
         failures = list(errors.queue)
-        if fail_update or fail_reset:
+        if fail_save:
+            self.assertTrue(any(str(e) == 'save failed' for e in failures), failures)
+            self.assertFalse(any(e[0] in ('insert', 'update', 'model_checkpoint')
+                                 or e[:2] == ('release', 0) for e in events))
+            self.assertFalse(any(e[:3] == ('send', 0, 'prepare_reset') for e in events))
+        elif fail_update or fail_reset:
             self.assertTrue(failures)
             self.assertTrue(any(str(e) == ('reset failed' if fail_reset else 'update failed') for e in failures), failures)
             self.assertTrue(all(env.frames == warmup + 1 for env in envs))
@@ -327,6 +348,20 @@ class SplitOverlapTests(unittest.TestCase):
 
     def test_stop_at_existing_step_does_not_create_robots(self):
         self.run_pair(start_step=24, max_steps=24)
+
+    def test_both_batches_saved_before_release_reset_and_checkpoint(self):
+        events = self.run_pair(checkpoint_buffer=True, warmup=1, max_steps=6)
+        saved = [e for e in events if e[0] == 'saved_batch']
+        self.assertEqual([(e[1], e[2], e[3]) for e in saved],
+                         [(0, 1, 1), (1, 2, 1), (0, 3, 1), (1, 4, 1), (0, 5, 1), (1, 6, 1)])
+        self.assertIn(('model_checkpoint', 6), events)
+        for index, event in enumerate(events):
+            if event[:3] == ('send', 0, 'prepare_reset'):
+                completed = int(event[3].split('/')[1])
+                self.assertEqual(sum(e[0] == 'insert' for e in events[:index]), completed * 2)
+
+    def test_batch_save_failure_does_not_release_or_admit_round(self):
+        self.run_pair(checkpoint_buffer=True, fail_save=True)
 
     def test_channel_wait_checks_background_failure(self):
         namespace = dict(time=time, message_id=lambda *a: 'test')

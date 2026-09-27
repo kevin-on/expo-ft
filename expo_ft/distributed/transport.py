@@ -7,7 +7,6 @@ applications share those same pages by Unix descriptor passing.
 import argparse
 from concurrent.futures import Future, TimeoutError as FutureTimeout
 import fcntl
-import hashlib
 import hmac
 import json
 import logging
@@ -24,6 +23,8 @@ import threading
 import time
 import traceback
 import uuid
+
+import xxhash
 
 from .buffer import Buffer, receive_packet, send_packet
 from .channel import atomic_json, message_id
@@ -58,7 +59,7 @@ def write(sock, value):
 
 
 def same_message(first, second):
-    if any(first[k] != second[k] for k in ('topic', 'key', 'size', 'sha256')):
+    if any(first[k] != second[k] for k in ('topic', 'key', 'size', 'xxh3_128')):
         raise ValueError('conflicting duplicate message')
 
 
@@ -74,7 +75,7 @@ class Store:
     def validate(self, meta):
         ident = meta['id']
         if (not re.fullmatch('[a-f0-9]{64}', ident) or ident != message_id(meta['topic'], meta['key'])
-                or not re.fullmatch('[a-f0-9]{64}', meta['sha256'])
+                or not re.fullmatch('[a-f0-9]{32}', meta.get('xxh3_128', ''))
                 or type(meta['size']) is not int or not 0 < meta['size'] <= self.max_bytes):
             raise ValueError('invalid message metadata')
 
@@ -168,7 +169,7 @@ class Store:
                 raise ValueError('incomplete message')
             entry = self.incoming[meta['id']]
             started = time.monotonic()
-            if entry['buffer'].digest() != meta['sha256']:
+            if entry['buffer'].digest() != meta['xxh3_128']:
                 entry['done'].clear()
                 raise ValueError('message checksum mismatch')
             entry['buffer'].seal()
@@ -181,7 +182,7 @@ class Store:
         if meta['size'] > self.chunk_bytes:
             raise ValueError('small message too large')
         data = exact(sock, meta['size'])
-        if hashlib.sha256(data).hexdigest() != meta['sha256']:
+        if xxhash.xxh3_128(data).hexdigest() != meta['xxh3_128']:
             raise ValueError('message checksum mismatch')
         with self.lock:
             if meta['id'] in self.received:

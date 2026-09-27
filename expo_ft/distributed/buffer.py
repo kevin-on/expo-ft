@@ -6,12 +6,13 @@ launched processes map the same pages, including inside a container (no shared
 """
 import array
 import fcntl
-import hashlib
 import json
 import mmap
 import os
 import socket
 import threading
+
+import xxhash
 
 
 class Buffer:
@@ -84,7 +85,7 @@ class Buffer:
 
     def digest(self):
         with self.view() as view:
-            return hashlib.sha256(view).hexdigest()
+            return xxhash.xxh3_128(view).hexdigest()
 
     def close(self):
         if self.mapping is not None:

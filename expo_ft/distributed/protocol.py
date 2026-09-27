@@ -1,12 +1,8 @@
 """Learning-level message identities and episode validation, without networking."""
 import json
-import os
 from pathlib import Path
-import struct
 
 import numpy as np
-
-from .channel import encode
 
 
 def key(session, round_id, *parts):
@@ -48,24 +44,3 @@ def receive_round(channel, session, round_id, version, num_robot):
             records.append(record)
         result.append((records, bool(end['success'])))
     return result
-
-
-def save_round(path, episodes, metadata):
-    """One durable file per round, distinct from a model/replay checkpoint cursor."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix('.tmp')
-    with temp.open('wb') as f:
-        for value in [metadata] + [{'robot': robot, 'success': success, 'transition': record}
-                                 for robot, (records, success) in enumerate(episodes) for record in records]:
-            payload = encode(value)
-            f.write(struct.pack('!Q', len(payload)))
-            f.write(payload)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temp, path)
-    fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)

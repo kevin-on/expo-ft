@@ -110,12 +110,12 @@ class LocalOverlapTests(unittest.TestCase):
                 result.append(([dict(observations=obs, actions=action, rewards=1., dones=True)], True))
             return result
 
-        def save(path, record, *, step):
+        def save(path, records, *, start_step):
             if fail_save:
                 raise RuntimeError('save failed')
             index = int(path.name[-1])
-            test.assertTrue(record['is_success'])
-            saved[index] += 1
+            test.assertTrue(all(record['is_success'] for record in records))
+            saved[index] += len(records)
 
         def insert(index, record):
             test.assertTrue(record['is_success'])
@@ -127,7 +127,7 @@ class LocalOverlapTests(unittest.TestCase):
                   jax=NS(random=NS(PRNGKey=lambda seed: Array([seed, 0])), device_put=lambda x, _: x,
                          device_get=lambda x: x, block_until_ready=block),
                   np=NS(asarray=lambda x: x), EnvClientWrapper=env_factory, collect_round=collect,
-                  save_replay_buffer_transition=save,
+                  save_replay_buffer_batch=save,
                   wandb=NS(log=lambda metrics, step: logs.append((step, dict(metrics)))))
         load_definitions('expo_ft/utils/robot_round.py', ['updates_for_round'], ns)
         load_definitions('expo_ft/utils/multi_robot_training.py', ['train_multi_robot'], ns)

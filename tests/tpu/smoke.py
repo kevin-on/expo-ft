@@ -212,6 +212,10 @@ try:
     ledger = json.loads((checkpoint_dir / "round-320.json").read_text())
     assert ledger["episode_count"] == 16 and ledger["num_robot"] == 2
     assert [len(list((checkpoint_dir / f"robot-{i}/buffers").glob("*.pkl")))
+            for i in range(2)] == [8, 8]  # one file per robot episode
+    from expo_ft.data.replay_buffer import _replay_files, _load_replay_file
+    assert [sum(len(_load_replay_file(start, end, path)) for start, end, path in
+                _replay_files(checkpoint_dir / f"robot-{i}/buffers"))
             for i in range(2)] == [128, 192]
     assert (checkpoint_dir / "320").is_dir()
     report("passed", updates=updates, episodes=16, transitions=320,

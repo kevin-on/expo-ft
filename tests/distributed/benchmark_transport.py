@@ -34,7 +34,7 @@ def sender(args):
         buffer.seal()
         expected = buffer.digest()
         # Exclude initial module imports, source read/hash and receiver startup.
-        channel.send('benchmark-hello', args.session, {'bytes': buffer.size, 'sha256': expected})
+        channel.send('benchmark-hello', args.session, {'bytes': buffer.size, 'xxh3_128': expected})
         channel.flush()
         channel.receive('benchmark-ready', args.session)
         rows = []
@@ -45,7 +45,7 @@ def sender(args):
             published = time.monotonic()
             result = channel.receive('benchmark-result', key)
             channel.wait_sent('benchmark-payload', key)
-            assert result['sha256'] == expected
+            assert result['xxh3_128'] == expected
             row = dict(trial=trial, bytes=buffer.size, **result,
                        sender_hash_handoff_seconds=published - started,
                        through_application_verification_seconds=time.monotonic() - started)
@@ -72,9 +72,9 @@ def receiver(args):
                 assert buffer.size == hello['bytes']
                 started = time.monotonic()
                 digest = buffer.digest()
-                result = dict(buffer.timings, sha256=digest,
+                result = dict(buffer.timings, xxh3_128=digest,
                               application_digest_seconds=time.monotonic() - started)
-                assert digest == hello['sha256']
+                assert digest == hello['xxh3_128']
             channel.release('benchmark-payload', key)
             channel.send('benchmark-result', key, result)
             channel.flush()

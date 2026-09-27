@@ -11,3 +11,4 @@ ml-collections
 tyro
 websockets==13.1
 pyspacemouse==1.1.5
+xxhash>=3.0.0
