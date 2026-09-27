@@ -96,11 +96,18 @@ def mock_client(args):
                 operation = request['operation']
                 if operation == 'create_env':
                     reply = {'env_id': f'mock-{args.robot}', 'task_description': 'pick up the cube'}
-                elif operation == 'reset':
+                elif operation in ('reset', 'reset_only'):
                     round_id += 1
                     index = 0
                     rows = pickle.loads((args.fixture / episodes[round_id]['file']).read_bytes())
-                    reply = {'observation': canonical_observation(rows[0]['observations'], args.robot == 1), 'done': False}
+                    reply = {'status': 'success'}
+                    if operation == 'reset':
+                        reply.update(observation=canonical_observation(rows[0]['observations'], args.robot == 1), done=False)
+                elif operation == 'start_episode':
+                    # Reset already selected this episode; read its first frame
+                    # without advancing the episode or the recorded action cursor.
+                    reply = {'status': 'success',
+                             'observation': canonical_observation(rows[0]['observations'], args.robot == 1)}
                 elif operation == 'step':
                     command = np.asarray(request['action'])
                     assert command.shape == (7,) and np.isfinite(command).all()

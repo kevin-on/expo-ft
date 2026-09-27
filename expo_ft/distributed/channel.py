@@ -172,9 +172,11 @@ class Channel:
         self.queue.join()
         self._check()
 
-    def _wait(self, op, topic, key, timeout):
+    def _wait(self, op, topic, key, timeout, check=None):
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         while True:
+            if check is not None:
+                check()
             result, fd = self._rpc(op, id=message_id(topic, key))
             if result['ready']:
                 return result, fd
@@ -182,8 +184,10 @@ class Channel:
                 raise TimeoutError('waiting for {} {} {}'.format(op, topic, key))
             time.sleep(.02)
 
-    def receive_buffer(self, topic, key, timeout=None):
-        result, fd = self._wait('receive', topic, key, timeout)
+    def receive_buffer(self, topic, key, timeout=None, *, check=None):
+        # Allow the application to surface background reset failures while waiting
+        # for the learner. The callback performs no transport or policy work.
+        result, fd = self._wait('receive', topic, key, timeout, check)
         buffer = Buffer.from_fd(fd)
         buffer.timings = result['meta'].get('timings', {})
         if result['meta']['topic'] != topic or result['meta']['key'] != key:
@@ -191,8 +195,8 @@ class Channel:
             raise ValueError('message identity mismatch')
         return buffer
 
-    def receive(self, topic, key, timeout=None):
-        with self.receive_buffer(topic, key, timeout) as buffer, buffer.view() as view:
+    def receive(self, topic, key, timeout=None, *, check=None):
+        with self.receive_buffer(topic, key, timeout, check=check) as buffer, buffer.view() as view:
             return decode(view)
 
     def release(self, topic, key):

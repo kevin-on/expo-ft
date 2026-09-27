@@ -193,6 +193,17 @@ class EnvClient:
         response = self._call_operation("reset", {"env_id": env_id})
         return response["observation"], response["done"]
 
+    def reset_only(self, env_id: str):
+        """Complete reset without capturing or returning the first observation."""
+        self._last_info = None
+        self._call_operation("reset_only", {"env_id": env_id})
+
+    def start_episode(self, env_id: str) -> dict:
+        """Read the fresh initial observation without running termination checks."""
+        self._last_info = None
+        response = self._call_operation("start_episode", {"env_id": env_id})
+        return response["observation"]
+
     def step(self, env_id: str, action: np.ndarray) -> Tuple[np.ndarray, str]:
         """Step the environment. Returns (real_executed_action, action_type)."""
         response = self._call_operation("step", {"env_id": env_id, "action": action})
@@ -282,6 +293,19 @@ class EnvClientWrapper:
             self.env_id, self.task_description = self.client.create_env(self.env_creation_request)
         observation, _ = self._call("reset", lambda: self.client.reset(self.env_id))
         return observation
+
+    def reset_only(self):
+        """Used exclusively by the synchronous trainer with recovery disabled."""
+        if self.recover:
+            raise ValueError("Deferred reset requires recover=False")
+        if self.env_id is None:
+            self.env_id, self.task_description = self.client.create_env(self.env_creation_request)
+        self.client.reset_only(self.env_id)
+
+    def start_episode(self):
+        if self.recover or self.env_id is None:
+            raise ValueError("start_episode requires a completed reset_only with recover=False")
+        return self.client.start_episode(self.env_id)
 
     def close(self):
         self.client.close()

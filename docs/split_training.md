@@ -1,5 +1,7 @@
 # Separate learner and inference machines
 
+For the prepared DeltaAI/ILIAD deployment, see the [machine launch scripts](../scripts/split/README.md).
+
 This is an opt-in path in `train_pi_robo.py`. `--split_role=local` (the default)
 keeps the existing single-process behavior. The split path supports synchronous
 EXPO episode rounds, one or two robots, and `delay=0`.
@@ -44,6 +46,8 @@ inference application's existing WS listener is a separate connection.
    It copies mutable arrays before handing them to a bounded writer queue.
    Serialization and WAN communication happen off the robot worker. Transport
    payloads are never written to disk.
+   At episode end the WS hands its video buffers to a background encoder before
+   returning terminal info; normal MP4 encoding no longer delays the last record.
 5. Learner admits only complete, correctly versioned episodes from both robots.
    It writes one durable received-round archive, then inserts records into replay
    in the existing robot order. Partial rounds never enter replay or training.
@@ -55,6 +59,66 @@ inference application's existing WS listener is a separate connection.
 7. A new version is sent after updates, then installed before the next round.
    Warmup rounds reuse the installed version. Inference uses its own RNG stream;
    its barrier RNG state is included in the learner checkpoint ledger.
+
+### Reset during learner updates
+
+```text
+Both episodes finish (WS encodes their MP4s in the background)
+  -> learner receives, durably saves the round, and inserts replay records
+  -> prepare_reset for the next round
+       learner: updates -> checkpoint if due -> snapshot transfer
+       inference/WS: reset both robots concurrently
+  -> join policy installation AND both resets
+  -> capture fresh observations -> next episode
+```
+
+After admitting a complete round into replay, the learner sends `prepare_reset`
+for the next round **before** updating. Inference resets both robots in background
+RPC workers while waiting for the normal `admit` and updated policy. The main
+inference thread alone installs/samples the policy. Once the required policy is
+installed and all resets finish, `start_episode` captures a fresh first observation
+and collection begins. No initial frame or success check is taken during the wait;
+mirror transforms and per-step streaming remain in the existing collector.
+
+The first reset happens only after initial policy/config validation. Warmup uses
+the same reset handshake even when no policy update is needed. On the final round,
+the learner sends stop instead of reset permission, so there is no extra reset.
+Checkpoint/resume cursors and learning settings are unchanged. `installed` still
+acknowledges policy installation; it does not claim reset motion has finished.
+
+Reset failures are checked while waiting for admission/policy. Session aborts are
+also checked while waiting for resets, before any new rollout. Shutdown closes WS
+connections before joining reset workers; a reset already sent to the NUC cannot
+be cancelled by closing a connection. **Robots now move during the update interval.**
+
+Deploy these changes to learner, inference and both WS clients together. The NUC
+DROID server, OpenPI and WAN transport/relay implementation do not need changes.
+The non-split/local training loop, collection and evaluation keep ordinary reset.
+No hardware validation is implied by the isolated tests:
+`python3 -B tests/test_split_reset_overlap_isolated.py` uses only the standard
+library, in-memory peers and fake robots (no sockets, GPU or hardware imports).
+
+### Background episode video encoding
+
+Split inference requests `async_video=True` when creating training environments.
+Each WS environment transfers ownership of completed `raw`/`record` frame lists
+to one `EpisodeVideoWriter` thread and immediately replaces its own buffers with
+empty lists. The encoder only sees those detached frames, never cameras, robot
+RPCs or the next episode's mutable buffers. `get_info_for_step` returns terminal
+info without waiting for normal encoding, allowing the last transition and
+episode-end message to reach the learner. The encoding/MP4 settings are unchanged.
+
+The writer retains at most one completed episode at a time. If a previous save
+still runs when the next episode ends, submission explicitly waits and logs a
+backlog warning rather than accumulating unbounded full-resolution video in RAM.
+Normal environment close/disconnect drains the writer; forced process termination
+cannot guarantee unfinished files are saved. Encoding errors remain nonfatal and
+are logged, as in the synchronous path. Collection, evaluation and non-split
+training retain their default synchronous video behavior.
+
+`python3 -B tests/test_async_video_isolated.py` checks terminal response while the
+encoder is blocked, detached buffer ownership, bounded backlog, close/drain and
+error reporting, without importing robot/camera code or running an encoder.
 
 ## Latency goal and RAM transport
 

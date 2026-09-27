@@ -3,7 +3,7 @@
 Dials the learner/eval host (which listens) and serves environment operations over
 that connection — a direct app-owned socket (no SSH tunnel). We dial because the
 robot workstation can't accept inbound connections while the learner/eval host can.
-Supports operations: create_env, reset, step, get_observation, get_info_for_step, render.
+Supports operations: create_env, reset, reset_only, start_episode, step, get_observation, get_info_for_step, render.
 """
 
 import asyncio
@@ -254,6 +254,8 @@ async def _handle_environment_request(websocket):
                     env_kwargs = dict(task_config)
                     env_kwargs["video_dir"] = request.get("video_dir") or ""
                     env_kwargs["env_usage"] = env_usage
+                    if env_usage == "train" and request.get("async_video", False):
+                        env_kwargs["async_video"] = True
                     env = task_config.env(**env_kwargs)
                     _env_storage[env_id] = env
                     if env_usage == "eval" and task_config.env_type == "droid":
@@ -283,6 +285,24 @@ async def _handle_environment_request(websocket):
                         }
                     await websocket.send(packer.pack(response))
                     
+                elif operation in ("reset_only", "start_episode"):
+                    env_id = request["env_id"]
+                    env = _env_storage.get(env_id)
+                    if env is None:
+                        response = {"status": "error", "message": f"Environment {env_id} not found"}
+                    elif env_id in _eval_env_ids:
+                        response = {"status": "error", "message": "Deferred reset is for training only"}
+                    elif operation == "reset_only":
+                        # Runs on the existing RPC thread, just like ordinary reset.
+                        # No camera frame/episode video frame is captured while waiting.
+                        env.reset(return_observation=False)
+                        response = {"status": "success"}
+                    else:
+                        # Fresh initial frame; no success detector or terminal handling
+                        # before the first action. get_observation records this frame.
+                        response = {"status": "success", "observation": env.get_observation()}
+                    await websocket.send(packer.pack(response))
+
                 elif operation == "step":
                     step_rpc_start = time.perf_counter()
                     env_id = request["env_id"]

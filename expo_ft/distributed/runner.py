@@ -5,6 +5,7 @@ individual canonical transitions are sent immediately in the background.
 """
 import json
 import logging
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 import re
 import time
@@ -141,9 +142,14 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
                 metrics[f'robot-{robot}/episode_length'] = len(records)
                 metrics[f'robot-{robot}/return'] = sum(float(r['rewards']) for r in records)
             count, pending_steps = updates_for_round(
-                pending_steps, round_steps, can_update=episode_count >= 10 * len(buffers) and step >= flags.batch_size,
+                pending_steps, round_steps, can_update=episode_count >= flags.split_warmup_episodes * len(buffers) and step >= flags.batch_size,
                 num_updates=flags.num_updates, step_interval=flags.step_interval,
             )
+            if step < flags.max_steps:
+                # Permit only the next reset. The normal admit/policy messages
+                # still gate rollout until updates and checkpointing finish.
+                channel.send('prepare_reset', key(session, round_id + 1), {'identity': contract})
+                channel.flush()
             update_started = time.monotonic()
             for _ in range(count):
                 batch, actor_batch, combine_rng = batch_processor.next_batch(combine_rng)
@@ -173,7 +179,10 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             round_id += 1
         if flags.checkpoint_model and step != last_checkpoint:
             checkpoint()
-        channel.send('admit', key(session, round_id), {'stop': True})
+        # After any completed round inference waits for reset permission first.
+        # A resume already at max_steps has no previous round and waits on admit.
+        stop_topic = 'prepare_reset' if round_id else 'admit'
+        channel.send(stop_topic, key(session, round_id), {'stop': True})
         channel.flush()
         channel.receive('stopped', session)
     except BaseException:
@@ -233,21 +242,55 @@ def run_inference(flags, agent=None, env_factory=None):
     channel = _channel(flags)
     session, round_id, installed = flags.split_session, 0, None
     envs = []
+    reset_workers = ThreadPoolExecutor(max_workers=flags.num_robot, thread_name_prefix='robot-reset')
+    resets = []
+
+    def begin_resets():
+        channel.check_session()
+        logging.info('Split round %d: resetting %d robots while waiting for policy', round_id, len(envs))
+        return [reset_workers.submit(env.reset_only) for env in envs]
+
+    def check_reset_errors():
+        for reset in resets:
+            if reset.done():
+                reset.result()
+
+    def finish_resets():
+        pending = set(resets)
+        while pending:
+            channel.check_session()
+            done, pending = wait(pending, timeout=.1, return_when=FIRST_COMPLETED)
+            for reset in done:
+                reset.result()
+        channel.check_session()
+
+    def acknowledge_stop():
+        channel.send('stopped', session, {'stopped': True})
+        channel.flush()
+        channel.wait_sent('stopped', session)
+
     try:
         while True:
-            admit = channel.receive('admit', key(session, round_id))
+            if round_id:
+                prepare = channel.receive('prepare_reset', key(session, round_id))
+                channel.release('prepare_reset', key(session, round_id))
+                if prepare.get('stop'):
+                    acknowledge_stop()
+                    break
+                if prepare['identity'] != contract:
+                    raise ValueError('learner/inference reset configuration mismatch')
+                resets = begin_resets()
+            admit = channel.receive('admit', key(session, round_id), check=check_reset_errors)
             channel.release('admit', key(session, round_id))
             if admit.get('stop'):
-                channel.send('stopped', session, {'stopped': True})
-                channel.flush()
-                channel.wait_sent('stopped', session)
+                acknowledge_stop()
                 break
             if admit['identity'] != contract:
                 raise ValueError('learner/inference configuration mismatch')
             version = admit['version']
             install_metrics = {}
             if installed != version:
-                with channel.receive_buffer('policy', key(session, version)) as snapshot:
+                with channel.receive_buffer('policy', key(session, version), check=check_reset_errors) as snapshot:
                     started = time.monotonic()
                     agent = import_policy(agent, snapshot, contract, version)
                     install_metrics = dict(snapshot.timings, install_seconds=time.monotonic() - started)
@@ -264,11 +307,15 @@ def run_inference(flags, agent=None, env_factory=None):
                         config = json.loads(path.read_text())
                         views = {k: config[k] for k in ('side_camera_id', 'wrist_camera_id')}
                     request = {'example_action': flags.config_task.example_action, 'env_usage': 'train',
+                               'async_video': True,
                                'video_dir': str(Path(flags.output_dir) / flags.run_name / 'train_videos' / f'robot-{robot}'),
                                'expected_camera_views': views}
                     envs.append((env_factory or EnvClientWrapper)(env_creation_request=request,
                         host=flags.client_host, port=flags.client_port + robot, recover=False, lazy=True))
+                resets = begin_resets()
             channel.send('installed', key(session, round_id), {'version': version, 'timings': install_metrics})
+            finish_resets()
+            resets = []
             def sample(observation):
                 nonlocal agent
                 actions, agent, _ = agent.sample_actions(observation)
@@ -279,16 +326,25 @@ def run_inference(flags, agent=None, env_factory=None):
                 channel.send('episode_end', key(session, round_id, robot), {'version': version, 'length': length, 'success': bool(success)})
             collect_round(envs, sample, flags.replan_steps, flags.config_task.control_hz,
                           mirror_robot=mirror_robot, on_transition=transition, on_episode_end=end,
-                          check_session=channel.check_session)
+                          check_session=channel.check_session, reset_done=True)
             channel.send('round_finished', key(session, round_id), {
                 'version': version, 'inference_rng': np.asarray(jax.device_get(agent.rng)).tolist(),
             })
             channel.flush()
             round_id += 1
     except BaseException:
+        # Interrupt reset RPC waits before publishing an abort (which itself may
+        # be delayed by a failed transport). Already issued NUC motion cannot be undone.
+        for env in envs:
+            env.close()
         _abort(channel, session)
         raise
     finally:
-        for env in envs:
-            env.close()
-        channel.close()
+        for reset in resets:
+            reset.cancel()
+        try:
+            for env in envs:
+                env.close()
+        finally:
+            reset_workers.shutdown(wait=True)
+            channel.close()

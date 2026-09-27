@@ -121,7 +121,11 @@ def model_role(args):
                 self.robot = kwargs['port'] - flags.client_port
                 self.step_number = 0
             def reset(self):
+                self.reset_only()
+                return self.start_episode()
+            def reset_only(self):
                 self.step_number = 0
+            def start_episode(self):
                 return self.get_observation()
             def get_observation(self):
                 from expo_ft.env.sft_eval import canonical_observation

@@ -8,6 +8,7 @@ from droid.robot_env import RobotEnv
 from client.envs.utils import process_image_for_obs
 from client.envs.zed_recorder import ZedRecorder, release_unused_zeds, release_zed_from_reader
 from client.real_utils.vis_utils import raw_frame_from_raw_obs, save_episode_video as save_episode_video_to_disk
+from client.real_utils.async_video import EpisodeVideoWriter
 from client.real_utils.detector import PickBlocksDetector
 from client.real_utils.detector import LightPlugDetector
 from client.real_utils.detector import success_detector_manual
@@ -32,6 +33,7 @@ class DroidEnv(RobotEnv):
         language_instruction = None,
         control_hz = None,
         video_dir = None,
+        async_video = False,
         camera_intrinsics = None,
         camera_extrinsics = None,
         record_camera = None,
@@ -84,18 +86,28 @@ class DroidEnv(RobotEnv):
         self._raw_frame_buffer = []
         self._record_frame_buffer = []
         self._ep_count = 0
+        self._video_writer = EpisodeVideoWriter(save_episode_video_to_disk) if async_video and video_dir else None
 
-    def reset(self):
+    def close(self):
+        try:
+            super().close()
+        finally:
+            writer = getattr(self, "_video_writer", None)
+            if writer is not None:
+                writer.close()
+
+    def reset(self, *, return_observation=True):
         self._before_reset()
         self._steps_since_reset = 0
         self._raw_frame_buffer = []
         self._record_frame_buffer = []
         super().reset(randomize=self.reset_random)
-        observation = self.get_observation()
-        # Reuse the reset observation; no extra RPC or motion command.
+        # Deferred rollout reads its first camera frame only after learner updates.
+        observation = self.get_observation() if return_observation else None
         logger = logging.getLogger(__name__)
         try:
-            actual = np.asarray(self.prev_obs["robot_state"]["joint_positions"])
+            actual = np.asarray(self.prev_obs["robot_state"]["joint_positions"]
+                                if return_observation else self._robot.get_joint_positions())
             if self.reset_random:
                 logger.info("RESET_CHECK actual_rad=%s error_unavailable=randomized_target",
                             actual.tolist())
@@ -133,17 +145,21 @@ class DroidEnv(RobotEnv):
 
         if done:
             print(f"Done! Success: {success}, Time stop: {time_stop}, Manual stop: {manual_stop}, Reached boundary: {reached_boundary}")
+            videos = []
             if self.video_dir and self._raw_frame_buffer:
-                save_episode_video_to_disk(
-                    self._raw_frame_buffer, self.video_dir, self._ep_count
-                )
+                videos.append(("raw", self._raw_frame_buffer))
                 self._raw_frame_buffer = []
             if self.video_dir and self._record_frame_buffer:
-                save_episode_video_to_disk(
-                    self._record_frame_buffer, self.video_dir, self._ep_count,
-                    prefix="record",
-                )
+                videos.append(("record", self._record_frame_buffer))
                 self._record_frame_buffer = []
+            if videos:
+                if self._video_writer is not None:
+                    # Transfer the old lists, not copies or buffers reused by reset.
+                    # Terminal RPC can return while the worker encodes the episode.
+                    self._video_writer.submit(videos, self.video_dir, self._ep_count)
+                else:
+                    for prefix, frames in videos:
+                        save_episode_video_to_disk(frames, self.video_dir, self._ep_count, prefix=prefix)
             if self.video_dir:
                 self._ep_count += 1
         self.done, self.success, self.reward, self.info = done, success, 1.0 if success else 0.0, {}
