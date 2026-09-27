@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# On the DeltaAI login node. Does not start models or robot clients.
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+load_profile "$@"
+[[ $(hostname -s) == "$DELTA_LOGIN_NODE" ]] || {
+    echo "Run on $DELTA_LOGIN_NODE (configured relay address $DELTA_LOGIN_IP)" >&2; exit 1;
+}
+require_file "$DELTA_RUN/link/relay.json"
+[[ -S "$AGENT_SOCKET" ]] || { echo 'Start the dedicated WS agent forward first' >&2; exit 1; }
+ssh -F "$DELTA_RUN/link/ssh-config" iliad-bench hostname
+cd "$DELTA_SHARED_SOURCE"
+python3 -u -m expo_ft.distributed.relay --config "$DELTA_RUN/link/relay.json" \
+    2>&1 | tee "$DELTA_RUN/relay.log"
