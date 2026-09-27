@@ -8,7 +8,8 @@ robot_index=${1:?Usage: run_workstation_rollout.sh 0|1}
 case "$robot_index" in 0|1) ;; *) echo 'Robot index must be 0 or 1' >&2; exit 2;; esac
 # Two-robot online training always uses the SFT/eval camera eyes and robot1 mirror.
 source /scr/kevinon/env.sh
-cd /scr/kevinon/workspace/expo-ft-fork
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$repo_root"
 # Refuse the temporary blank-camera setup for this real four-camera run.
 client/.venv/bin/python - "$robot_index" <<'PY'
 import json
