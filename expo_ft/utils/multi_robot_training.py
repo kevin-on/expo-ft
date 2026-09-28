@@ -12,7 +12,7 @@ from expo_ft.data.replay_buffer import (
     prepare_robot_replay_resume, restore_replay_buffer, save_replay_buffer_batch,
 )
 from expo_ft.env.env_client import EnvClientWrapper
-from expo_ft.utils.log_utils import InterventionStats
+from expo_ft.utils.log_utils import log_round_interventions
 from expo_ft.utils.robot_round import collect_round, updates_for_round
 
 
@@ -27,7 +27,6 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
             config = json.loads(path.read_text())
             camera_views[index] = {key: config[key] for key in ("side_camera_id", "wrist_camera_id")}
     step, episode_count, pending_steps = start_step, 0, 0
-    intervention_stats = InterventionStats(len(buffers))
     combine_rng = jax.random.PRNGKey(flags.seed + 100)
     if resuming:
         state = json.loads((checkpoint_dir / f"round-{step}.json").read_text())
@@ -36,9 +35,6 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
         if state.get("mirror_robot") != mirror_robot:
             raise ValueError("Resume requires the same live robot mirror convention")
         episode_count, pending_steps = state["episode_count"], state["pending_steps"]
-        intervention_stats = InterventionStats(len(buffers), state.get("intervention_stats"), episode_count)
-        if "intervention_stats" not in state:
-            logging.warning("Checkpoint has no intervention totals; counting from this resume onward")
         combine_rng = np.asarray(state["combine_rng"], dtype=np.uint32)
         prepare_robot_replay_resume(checkpoint_dir, up_to_step=step, num_robot=len(buffers))
         for index, buffer in enumerate(buffers):
@@ -65,7 +61,7 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
         # the model checkpoint, so a restored policy always has a full barrier.
         state = dict(num_robot=len(buffers), episode_count=episode_count,
                      pending_steps=pending_steps, combine_rng=np.asarray(combine_rng).tolist(),
-                     mirror_robot=mirror_robot, intervention_stats=intervention_stats.state_dict())
+                     mirror_robot=mirror_robot)
         (checkpoint_dir / f"round-{step}.json").write_text(json.dumps(state))
         save_checkpoint(checkpoint_manager, agent, step)
 
@@ -136,7 +132,7 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
                 jax.block_until_ready(agent)
             check_reset_errors()
             episode_count += len(episodes)
-            intervention_stats.on_round_done(episodes, metrics)
+            log_round_interventions(episodes, metrics)
             metrics.update(episodes=episode_count, updates=count, round_steps=round_steps)
             wandb.log(metrics, step=step)
             logging.info("Round complete: %d episodes, %d transitions, %d updates", episode_count, step, count)

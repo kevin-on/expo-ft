@@ -284,7 +284,7 @@ class SplitOverlapTests(unittest.TestCase):
             wandb=NS(log=lambda *a, **kw: None), EnvClientWrapper=None,
         )
         load_definitions('expo_ft/utils/robot_round.py', ['updates_for_round'], namespace)
-        load_definitions('expo_ft/utils/log_utils.py', ['InterventionStats'], namespace)
+        load_definitions('expo_ft/utils/log_utils.py', ['log_round_interventions'], namespace)
         load_definitions('expo_ft/distributed/runner.py', ['_abort', 'run_learner', 'run_inference'], namespace)
         peers = [Peer(0), Peer(1)]
         namespace['_channel'] = lambda flags: peers[flags.role]

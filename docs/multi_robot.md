@@ -147,11 +147,16 @@ checks camera streams and must not run while collection owns them.
 Local and split learners log intervention metrics after each completed round.
 `robot-N/intervention_rate` is that episode's `is_hil` count divided by its
 length; `training/intervention_rate` combines all robots' human steps and
-total steps (not the mean of their ratios). Both prefixes also report cumulative
-`episodes_with_intervention` and `total_intervention_transitions`. Counts include
-online warmup episodes, not seeded demos or replay samples. New checkpoint
-ledgers preserve these totals across resume; old ledgers without them log a
-warning and start the counters at zero.
+total steps (not the mean of their ratios).
+`robot-N/had_intervention` is 1 if any step had `is_hil=True`, otherwise 0.
+`robot-N/success_without_intervention` is 1 only for a successful episode with
+zero human steps. These are logged alongside that episode's `robot-N/success`.
+The corresponding `training/` values are the mean across episodes in the current
+round (0, 0.5 or 1 for two robots), not cumulative rates. Single-robot training
+logs the same three metrics under `training/`, with binary episode indicators.
+Online warmup episodes are included; seeded demos and replay samples are not.
+No cumulative intervention statistics are logged or saved in new checkpoint
+ledgers. Resuming older checkpoints ignores their unused intervention totals.
 
 See [tests/README.md](../tests/README.md). Mocked client tests exercise routing,
 reset/vertical/bounds/recording behavior without devices. CPU replay/RPC tests
