@@ -53,7 +53,7 @@ class SpaceMousePolicy:
         # Clip to [-1, 1] range
         action = np.clip(action, -1.0, 1.0)
         if include_info:
-            info_dict = {}
+            info_dict = {"button_pressed": bool(any(buttons))}
             return action, info_dict
         else:
             return action

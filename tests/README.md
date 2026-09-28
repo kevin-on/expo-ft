@@ -37,6 +37,18 @@ unrelated suites in one Python process or install missing dependencies into a
 live robot environment. Test only what a change affects; syntax/link checks
 suffice for documentation-only edits.
 
+For the standalone SpaceMouse/override tests on WS, reuse an isolated pytest
+install (no changes to the active client environment). `--noconftest` avoids
+the unrelated replay/JAX fixtures; this file supplies its own simulated HID:
+
+```bash
+source /scr/kevinon/env.sh
+uv pip install --python client/.venv/bin/python --target /scr/kevinon/tmp/expo-hil-test-deps pytest
+PYTHONPATH=/scr/kevinon/tmp/expo-hil-test-deps OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  PYTHONDONTWRITEBYTECODE=1 client/.venv/bin/python -m pytest --noconftest \
+  tests/cpu/test_spacemouse.py -q -p no:cacheprovider
+```
+
 ## Reusable integration / measurement tools
 
 - `gpu/learner_smoke.py`: a recorded HDF5 episode, real inference/updates and
