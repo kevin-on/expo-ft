@@ -205,8 +205,9 @@ def _get_human_override_action(task_config: Optional[Any] = None) -> tuple:
                 device_number=getattr(task_config, "spacemouse_device_number", 0),
                 device_path=getattr(task_config, "spacemouse_device_path", None),
             )
-        action_7d, _ = _spacemouse_policy.forward(None, include_info=True)
-        is_active = np.linalg.norm(action_7d[:6]) > _HUMAN_OVERRIDE_NORM_THRESHOLD
+        action_7d, info = _spacemouse_policy.forward(None, include_info=True)
+        is_active = (np.linalg.norm(action_7d[:6]) > _HUMAN_OVERRIDE_NORM_THRESHOLD
+                     or info.get("button_pressed", False))
         return (action_7d, True) if is_active else (None, False)
     except Exception as e:
         logging.getLogger(__name__).warning("Spacemouse unavailable (%s), using policy action.", e)

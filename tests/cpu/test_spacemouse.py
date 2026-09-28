@@ -106,3 +106,26 @@ def test_rollout_forwards_hid_path(mouse_modules, monkeypatch):
     ))
     assert opened == ["/hid/mouse-1"]
     assert run_client._spacemouse_policy.spacemouse.device.name == sdk.device_specs["SpaceMouse Compact"].name
+
+
+@pytest.mark.parametrize("buttons,gripper", [([1, 0], 1), ([0, 1], -1), ([1, 1], 1)])
+def test_button_hold_overrides_policy_without_arm_motion(mouse_modules, monkeypatch, buttons, gripper):
+    import numpy as np
+    from client import run_client
+    sdk, wrapper, devices, _, _ = mouse_modules
+    devices.append(("/hid/mouse-0", *sdk.device_specs["SpaceNavigator"].hid_id))
+    policy = wrapper.SpaceMousePolicy(device_path="/hid/mouse-0")
+    monkeypatch.setattr(run_client, "_spacemouse_policy", policy)
+    task = SimpleNamespace(enable_spacemouse=True)
+    policy.spacemouse.latest_buttons = buttons
+    for _ in range(3):
+        action, human = run_client._get_human_override_action(task)
+        assert human
+        np.testing.assert_array_equal(action[:6], np.zeros(6))
+        assert action[6] == gripper
+    # Releasing all buttons with no motion restores the existing policy fallback.
+    policy.spacemouse.latest_buttons = [0, 0]
+    assert run_client._get_human_override_action(task) == (None, False)
+    # Movement alone still activates the override.
+    policy.spacemouse.latest_action[0] = 0.2
+    assert run_client._get_human_override_action(task)[1]
