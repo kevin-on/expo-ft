@@ -76,7 +76,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
         if state['last_session'] == session:
             raise ValueError('resume requires a fresh session ID')
         episode_count, pending_steps = state['episode_count'], state['pending_steps']
-        intervention_stats = InterventionStats(len(buffers), state.get('intervention_stats'))
+        intervention_stats = InterventionStats(len(buffers), state.get('intervention_stats'), episode_count)
         if 'intervention_stats' not in state and group.leader:
             logging.warning('Checkpoint has no intervention totals; counting from this resume onward')
         combine_rng = replicate(np.asarray(state['combine_rng'], dtype=np.uint32), replicated_sharding)

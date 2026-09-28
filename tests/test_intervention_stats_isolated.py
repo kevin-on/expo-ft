@@ -18,6 +18,10 @@ class InterventionStatsTests(unittest.TestCase):
             ([{'is_hil': False}] * 6, True),
         ], metrics)
         self.assertEqual(metrics['training/intervention_rate'], 0.25)
+        self.assertEqual(metrics['training/intervention_step_rate'], 0.25)
+        self.assertEqual(metrics['training/intervention_episode_rate'], 0.5)
+        self.assertEqual(metrics['robot-0/intervention_episode_rate'], 1.0)
+        self.assertEqual(metrics['robot-1/intervention_episode_rate'], 0.0)
         self.assertEqual(metrics['robot-0/intervention_rate'], 1.0)
         self.assertEqual(metrics['robot-1/intervention_rate'], 0.0)
         self.assertEqual(metrics['training/episodes_with_intervention'], 1)
@@ -28,6 +32,11 @@ class InterventionStatsTests(unittest.TestCase):
             ([{'is_hil': False}], True), ([{'is_hil': True}], False),
         ], metrics)
         self.assertEqual(metrics['training/intervention_rate'], 0.5)
+        self.assertEqual(metrics['training/intervention_step_rate'], 0.5)
+        self.assertEqual(metrics['training/intervention_episode_rate'], 0.5)
+        self.assertEqual(metrics['robot-0/intervention_episode_rate'], 0.5)
+        self.assertEqual(metrics['robot-1/intervention_episode_rate'], 0.5)
+        self.assertEqual(resumed.state_dict()['total_episodes'], [2, 2])
         self.assertEqual(metrics['training/episodes_with_intervention'], 2)
         self.assertEqual(metrics['training/total_intervention_transitions'], 3)
         self.assertEqual(metrics['robot-0/total_intervention_transitions'], 2)
@@ -39,6 +48,19 @@ class InterventionStatsTests(unittest.TestCase):
         metrics = {}
         stats.on_round_done([([{'is_hil': False}], False), ([], False)], metrics)
         self.assertTrue(all(value == 0 for value in metrics.values()))
+
+    def test_legacy_metric_ledger_uses_restored_episode_count(self):
+        stats = InterventionStats(2, {
+            'episodes_with_intervention': [3, 1],
+            'total_intervention_transitions': [6, 2],
+        }, episode_count=10)
+        metrics = {}
+        stats.on_round_done([
+            ([{'is_hil': True}], True), ([{'is_hil': False}], True),
+        ], metrics)
+        self.assertAlmostEqual(metrics['training/intervention_episode_rate'], 5 / 12)
+        self.assertAlmostEqual(metrics['robot-0/intervention_episode_rate'], 4 / 6)
+        self.assertAlmostEqual(metrics['robot-1/intervention_episode_rate'], 1 / 6)
 
 
 if __name__ == '__main__':

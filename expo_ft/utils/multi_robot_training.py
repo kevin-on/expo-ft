@@ -36,7 +36,7 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
         if state.get("mirror_robot") != mirror_robot:
             raise ValueError("Resume requires the same live robot mirror convention")
         episode_count, pending_steps = state["episode_count"], state["pending_steps"]
-        intervention_stats = InterventionStats(len(buffers), state.get("intervention_stats"))
+        intervention_stats = InterventionStats(len(buffers), state.get("intervention_stats"), episode_count)
         if "intervention_stats" not in state:
             logging.warning("Checkpoint has no intervention totals; counting from this resume onward")
         combine_rng = np.asarray(state["combine_rng"], dtype=np.uint32)

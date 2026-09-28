@@ -10,30 +10,40 @@ import numpy as np
 class InterventionStats:
     """Online episode counts per robot; demos and replay sampling are excluded."""
 
-    def __init__(self, num_robot, state=None):
+    def __init__(self, num_robot, state=None, episode_count=0):
+        # Older metric ledgers lack denominators, but every completed round has
+        # one episode per robot. With no metric ledger, start both counts fresh.
+        previous_episodes = episode_count // num_robot if state else 0
         state = state or {}
         self.episodes = list(state.get("episodes_with_intervention", [0] * num_robot))
         self.transitions = list(state.get("total_intervention_transitions", [0] * num_robot))
+        self.completed = list(state.get("total_episodes", [previous_episodes] * num_robot))
 
     def state_dict(self):
         return {"episodes_with_intervention": list(self.episodes),
-                "total_intervention_transitions": list(self.transitions)}
+                "total_intervention_transitions": list(self.transitions),
+                "total_episodes": list(self.completed)}
 
     def on_round_done(self, episodes, metrics):
         human_steps, total_steps = 0, 0
         for robot, (records, _) in enumerate(episodes):
             human = sum(bool(record.get("is_hil", False)) for record in records)
+            self.completed[robot] += 1
             self.episodes[robot] += int(human > 0)
             self.transitions[robot] += human
             human_steps += human
             total_steps += len(records)
             metrics.update({
                 f"robot-{robot}/intervention_rate": human / len(records) if records else 0.0,
+                f"robot-{robot}/intervention_step_rate": human / len(records) if records else 0.0,
+                f"robot-{robot}/intervention_episode_rate": self.episodes[robot] / self.completed[robot],
                 f"robot-{robot}/episodes_with_intervention": self.episodes[robot],
                 f"robot-{robot}/total_intervention_transitions": self.transitions[robot],
             })
         metrics.update({
             "training/intervention_rate": human_steps / total_steps if total_steps else 0.0,
+            "training/intervention_step_rate": human_steps / total_steps if total_steps else 0.0,
+            "training/intervention_episode_rate": sum(self.episodes) / sum(self.completed) if sum(self.completed) else 0.0,
             "training/episodes_with_intervention": sum(self.episodes),
             "training/total_intervention_transitions": sum(self.transitions),
         })
@@ -103,6 +113,8 @@ class TrainingStats:
             "training/length": float(ep.ep_len),
             "training/success": float(success),
             "training/intervention_rate": intervention_rate,
+            "training/intervention_step_rate": intervention_rate,
+            "training/intervention_episode_rate": self.intervention_count / self.ep_count,
             "training/episodes_with_intervention": float(self.intervention_count),
             "training/total_intervention_transitions": float(self.total_intervention_transitions),
         })

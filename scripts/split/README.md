@@ -426,6 +426,18 @@ manual saving to an already-running older process.
 - Per-run shared logs: `learner.log`, `inference.log`, `transport-ROLE.log`.
   Checkpoints/replay: `DELTA_RUN_ROOT/RUN/checkpoints`.
   Videos are written on WS to `WS_VIDEO_ROOT`, not to ILIAD's filesystem.
+- For the balance0927 seed42 datasets, use W&B group
+  `pick_cube_balance_0927_seed42` across dataset sizes, wrist options and GPU
+  counts. Put those individual experiment differences in the run name/config,
+  rather than creating a separate group for each launch.
+- `robot-N/intervention_step_rate` is the fraction of human-controlled steps in
+  that robot's latest episode; `training/intervention_step_rate` pools both
+  episodes in the latest round (weighted by their step counts).
+  `robot-N/intervention_episode_rate` and `training/intervention_episode_rate`
+  are cumulative fractions of completed episodes with at least one human step.
+  Warmup episodes count; demonstrations do not. Counts survive checkpoint resume;
+  checkpoints predating intervention totals start metric counting anew.
+  The old `intervention_rate` keys remain aliases of the step rates.
 - `split/update_seconds` includes replay batch preparation and GPU completion.
   `through_inference_ready_seconds` spans update end through snapshot export,
   hash/handoff, receive/verify, GPU installation and installed ACK. It excludes
