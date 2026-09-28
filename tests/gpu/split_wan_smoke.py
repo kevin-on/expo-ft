@@ -207,7 +207,7 @@ def node(args):
                                          '--config', args.transport_config])
         base = [sys.executable, '-u', __file__, '--fixture', str(args.fixture), '--params', str(args.params),
                 '--assets', str(args.assets), '--asset-id', args.asset_id, '--session', args.session,
-                '--rounds', str(args.rounds), '--port', str(args.port), '--mailbox', args.mailbox]
+                '--rounds', str(args.rounds), '--playback-hz', str(args.playback_hz), '--port', str(args.port), '--mailbox', args.mailbox]
         model = launch(args.node_role, base + ['--role', args.node_role, '--output', str(args.output / args.node_role)])
         workload = [model]
         if args.node_role == 'inference':
@@ -263,7 +263,7 @@ def model_role(args):
     manifest = json.loads((args.fixture / 'manifest.json').read_text())
     reference = pickle.loads((args.fixture / 'reference.pkl').read_bytes())
     task, config = get_task(), get_config()
-    task.control_hz = 1000  # accelerated recorded playback, never real hardware
+    task.control_hz = args.playback_hz  # recorded playback only; never real hardware
     config.pi05_weight_loader_path = str(args.params)
     config.pi05_assets_dir, config.pi05_asset_id = str(args.assets), args.asset_id
     flags = SimpleNamespace(config=config, config_task=task, seed=42, replan_steps=8, num_robot=2,
@@ -446,9 +446,13 @@ if __name__ == '__main__':
     parser.add_argument('--mailbox')
     parser.add_argument('--session', default='wan-recorded-20260925')
     parser.add_argument('--rounds', type=int, default=12)
+    parser.add_argument('--playback-hz', type=int, default=1000,
+                        help='Mock playback rate; use 10 for real-time collection cadence')
     parser.add_argument('--robot', type=int)
     parser.add_argument('--port', type=int, default=19400)
     args = parser.parse_args()
+    if args.playback_hz <= 0:
+        parser.error('--playback-hz must be positive')
     if args.rounds < 12:
         parser.error('Use at least 12 rounds to update and infer with a replacement policy')
     {'prepare': prepare, 'mock': mock_client, 'node': node}.get(args.role, model_role)(args)
