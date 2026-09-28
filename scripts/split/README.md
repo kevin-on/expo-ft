@@ -366,6 +366,10 @@ that expanded fixture read-only on both hosts. Original source records were from
 Check available shared fixture directories before an allocation expires; do not
 assume node-local `/tmp` is persistent.
 
+For a two-node/eight-GH200 learner, configure the optional profile fields in
+[the two-node guide](../../docs/multinode_learner.md#real-robot-training-deployment-status).
+The same `run_role.sh learner RUN` launches both ranks; inference stays single-node.
+
 ## 7. Inspect, stop, restart
 
 For a manual checkpoint, run this in a separate terminal on the learner's

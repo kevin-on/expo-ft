@@ -16,7 +16,7 @@ only that base commit does not reproduce the tested two-node implementation.
 | Mode | Learner processes | Sampling / batch layout | Launcher status |
 | --- | --- | --- | --- |
 | One-node learner | One process using that node's GPUs | Existing replacement sampling / flat UTD batch | Existing `scripts/split/run_role.sh` |
-| Two-node learner | One process per node, four GPUs each | Global index plan / `(UTD, batch, ...)` | Validated compute/mock wrappers below; production wrapper not yet adapted |
+| Two-node learner | One process per node, four GPUs each | Global index plan / `(UTD, batch, ...)` | `scripts/split/run_role.sh` with `DELTA_NODE_COUNT=2` |
 
 For one-node execution, leave `EXPO_PROCESS_COUNT` unset or set it to `1`.
 Do not inherit `EXPO_PROCESS_COUNT=2` from a distributed learner shell when
@@ -85,8 +85,9 @@ and uses `--network=single_node_vni,disable_rdzv_get`. It requires
 does not silently count as a successful fast-path test. The container's glibc,
 C++ runtime, Python, JAX, NCCL and OpenSSL remain unchanged.
 
-The existing `scripts/split/run_role.sh` is still the **one-node** deployment
-launcher; merely setting its GPU count to eight does not create a two-node job.
+The existing `scripts/split/run_role.sh` defaults to one node. Two-node runs
+require `DELTA_NODE_COUNT=2`, `DELTA_NODES`, `DELTA_COORDINATOR` and
+`DELTA_SHARED_JAX_CACHE`; merely setting its GPU count to eight is insufficient.
 The two-node launch and container binding recipe used for validation is in
 `tests/gpu/multinode_validation/`. Its dated job IDs and staging paths are
 explicitly guarded and must be rechecked/adapted for a fresh allocation.
@@ -99,10 +100,23 @@ experiment's live relay or start physical WS clients for these tests.
 ### Real-robot training deployment status
 
 The application supports two-node split learning; the end-to-end validation
-uses recorded mock clients. There is **not yet a ready two-node production
-`run_role.sh` command**. The one-node wrapper also creates one sidecar per
-invocation, takes a run lock and uses node-local compilation cache, so wrapping
-two copies in `srun` is insufficient. The remaining launcher integration is:
+uses recorded mock clients. The production `run_role.sh` now implements the
+following launch contract. One invocation starts both learner ranks; only rank 0
+owns the run lock, sidecar and W&B. Configure the profile as follows:
+
+```bash
+DELTA_NODE_COUNT=2
+DELTA_NODES=gh042,gh047  # recheck allocation
+DELTA_COORDINATOR=gh042:29451
+DELTA_SHARED_JAX_CACHE=/shared/path/to/validated-8gpu-cache
+DELTA_CHECKPOINT=/shared/path/to/selected-sft-checkpoint
+ILIAD_CHECKPOINT=/iliad/path/to/the-same-sft-checkpoint
+```
+
+`DELTA_SHARED_JAX_CACHE` is the directory containing the actual eight-GPU cache
+entries, mounted at `/jax-cache/sync-EXPOLearner-n8`. Both learner hosts need
+the staged `fabric-libs/` from the verified OFI setup below. The checkpoint
+overrides avoid silently selecting an older `$STAGE/checkpoint`. The contract:
 
 1. Stage the same EXPO/OpenPI, SFT `params/` + matching `assets/`, tokenizer and
    demonstration dataset on both learner hosts. The dataset must produce the
