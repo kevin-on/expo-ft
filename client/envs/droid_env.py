@@ -108,18 +108,17 @@ class DroidEnv(RobotEnv):
         try:
             actual = np.asarray(self.prev_obs["robot_state"]["joint_positions"]
                                 if return_observation else self._robot.get_joint_positions())
-            if self.reset_random:
-                logger.info("RESET_CHECK actual_rad=%s error_unavailable=randomized_target",
-                            actual.tolist())
-            else:
+            if not self.reset_random:
                 target = np.asarray(self.reset_joints)
                 error = actual - target
-                logger.info(
-                    "RESET_CHECK target_rad=%s actual_rad=%s error_rad=%s max_abs_error_rad=%.6f",
-                    target.tolist(), actual.tolist(), error.tolist(), float(np.max(np.abs(error))),
-                )
+                max_abs_error = float(np.max(np.abs(error)))
+                if max_abs_error >= 0.1:
+                    logger.warning(
+                        "RESET_CHECK target_rad=%s actual_rad=%s error_rad=%s max_abs_error_rad=%.6f",
+                        target.tolist(), actual.tolist(), error.tolist(), max_abs_error,
+                    )
         except (KeyError, TypeError, ValueError) as exc:
-            logger.warning("RESET_CHECK joint comparison unavailable: %s", exc)
+            logger.debug("RESET_CHECK joint comparison unavailable: %s", exc)
         return observation
 
     def _before_reset(self):
