@@ -368,6 +368,25 @@ assume node-local `/tmp` is persistent.
 
 ## 7. Inspect, stop, restart
 
+For a manual checkpoint, run this in a separate terminal on the learner's
+login node (from the deployed repo):
+
+```bash
+bash scripts/request_checkpoint.sh "$DELTA_RUN_ROOT/$RUN/checkpoints"
+```
+
+Pass the existing run's **checkpoint directory**, not a numbered checkpoint.
+Each Enter creates `save.request`. Local multi-robot and split learners check
+it after the current round's updates, save with the existing round ledger,
+wait for completion, remove the request and log `Manual checkpoint saved ...`.
+Requests coalesce while one is pending, including during saving; an interval
+save due at the same boundary is not duplicated. Manual requests work even
+without `--checkpoint_model`; resumable replay still requires
+`--checkpoint_buffer` throughout the run. With two learner nodes, rank 0
+checks the file and both ranks participate in saving. Ctrl+C here exits only
+the request script. This requires the updated learner code; it does not add
+manual saving to an already-running older process.
+
 - Per-run shared logs: `learner.log`, `inference.log`, `transport-ROLE.log`.
   Checkpoints/replay: `DELTA_RUN_ROOT/RUN/checkpoints`.
   Videos are written on WS to `WS_VIDEO_ROOT`, not to ILIAD's filesystem.

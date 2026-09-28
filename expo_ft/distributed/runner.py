@@ -94,6 +94,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
 
     group.call(publish_policy)
     last_checkpoint = start_step
+    save_request = directory / 'save.request'
 
     def checkpoint():
         # The checkpoint cursor is independent from transport receipt IDs.
@@ -196,8 +197,16 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             if group.leader:
                 wandb.log(metrics, step=step, commit=not (count and step < flags.max_steps))
             logging.info('Split round %d complete: %d episodes, %d transitions, %d updates', round_id, episode_count, step, count)
-            if flags.checkpoint_model and flags.checkpoint_interval > 0 and step - last_checkpoint >= flags.checkpoint_interval:
+            manual_save = group.call(save_request.is_file)
+            if manual_save or (flags.checkpoint_model and flags.checkpoint_interval > 0
+                               and step - last_checkpoint >= flags.checkpoint_interval):
                 checkpoint()
+                if manual_save:
+                    checkpoint_manager.wait_until_finished()
+                    group.barrier('manual-checkpoint-saved')
+                    group.call(lambda: save_request.unlink(missing_ok=True))
+                    if group.leader:
+                        logging.info('Manual checkpoint saved at step %d in %s', step, directory)
                 last_checkpoint = step
             if count and step < flags.max_steps:
                 version = step

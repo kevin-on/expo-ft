@@ -16,7 +16,8 @@ from test_split_reset_overlap_isolated import Array, load_definitions, ROOT
 
 class LocalOverlapTests(unittest.TestCase):
     def run_local(self, *, slow_reset=False, fail_reset=None, fail_update=False,
-                  fail_save=False, fail_close=False, rounds=12, start_step=0):
+                  fail_save=False, fail_close=False, rounds=12, start_step=0,
+                  manual_save=False, checkpoint_interval=0):
         events, envs, requests, logs = [], [], [], []
         started = [threading.Event(), threading.Event()]
         update_started, updates_finished = threading.Event(), threading.Event()
@@ -87,6 +88,8 @@ class LocalOverlapTests(unittest.TestCase):
             def update(self, *args):
                 test.assertEqual(threading.get_ident(), caller)
                 if self.version == 0:
+                    if manual_save:
+                        (Path(tmp)/'save.request').touch()
                     update_started.set()
                     for event in started:
                         test.assertTrue(event.wait(2), 'next reset must start during update')
@@ -134,7 +137,7 @@ class LocalOverlapTests(unittest.TestCase):
         flags = NS(seed=1, max_steps=2 * rounds, replan_steps=8, client_host='', client_port=8102,
                    config_task=NS(example_action=[], control_hz=10), batch_size=1,
                    num_updates=3, step_interval=1, utd_ratio=20,
-                   checkpoint_buffer=True, checkpoint_model=True, checkpoint_interval=0)
+                   checkpoint_buffer=True, checkpoint_model=True, checkpoint_interval=checkpoint_interval)
         agent = Agent()
         with tempfile.TemporaryDirectory() as tmp:
             def run():
@@ -155,6 +158,13 @@ class LocalOverlapTests(unittest.TestCase):
                         run()
                 else:
                     run()
+                if manual_save:
+                    self.assertFalse((Path(tmp)/'save.request').exists())
+                    self.assertEqual([e for e in events if e[0] == 'checkpoint'],
+                                     [('checkpoint', 22), ('checkpoint', 24)])
+                    saved_event = events.index(('checkpoint', 22))
+                    self.assertLess(events.index(('updates_finished', 3)), saved_event)
+                    self.assertEqual(events[saved_event + 1], ('checkpoint_drained',))
                 for env in envs:
                     self.assertEqual(env.resets, rounds - start_step // 2)
                     self.assertEqual(env.frames, env.resets)
@@ -174,6 +184,12 @@ class LocalOverlapTests(unittest.TestCase):
 
     def test_resets_overlap_update_and_observation_uses_new_policy(self):
         self.run_local()
+
+    def test_manual_checkpoint_after_updates_and_training_continues(self):
+        self.run_local(manual_save=True)
+
+    def test_manual_checkpoint_coinciding_with_interval_is_not_duplicated(self):
+        self.run_local(manual_save=True, checkpoint_interval=22)
 
     def test_slow_second_reset_blocks_both_observations(self):
         self.run_local(slow_reset=True)
