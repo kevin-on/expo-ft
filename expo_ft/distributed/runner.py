@@ -8,6 +8,7 @@ import logging
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 import re
+import sys
 import time
 
 import jax
@@ -18,6 +19,7 @@ from .policy import export_policy, import_policy, identity
 from .protocol import key, receive_round, task_contract
 from .learner_group import LearnerGroup, local_value, replicate
 from expo_ft.utils.log_utils import InterventionStats
+from expo_ft.utils.rollout_dashboard import RolloutDashboard
 
 
 def _channel(flags):
@@ -284,6 +286,13 @@ def run_inference(flags, agent=None, env_factory=None):
 
     if flags.resume:
         raise ValueError('Only learner uses --resume; inference receives RNG/policy from learner')
+    dashboard = None
+    if getattr(flags, 'rollout_dashboard', False):
+        if not sys.stdin.isatty() or not sys.stdout.isatty() or not flags.rollout_log:
+            raise ValueError('Rollout dashboard requires ssh -tt / srun --pty and --rollout_log')
+        dashboard = RolloutDashboard(flags.num_robot, flags.config_task.auto_reset_steps, flags.rollout_mode)
+    elif getattr(flags, 'rollout_mode', 'auto') == 'manual':
+        raise ValueError('Manual rollout requires --rollout_dashboard')
     agent = build_inference(flags) if agent is None else agent
     mirror_robot = 1 if flags.num_robot == 2 else None
     contract = identity(agent, task_contract(flags, mirror_robot))
@@ -293,12 +302,28 @@ def run_inference(flags, agent=None, env_factory=None):
     reset_workers = ThreadPoolExecutor(max_workers=flags.num_robot, thread_name_prefix='robot-reset')
     resets = []
 
-    def begin_resets():
+    def check_session():
+        if dashboard is not None:
+            dashboard.check()
         channel.check_session()
+
+    def reset_robot(robot, env):
+        if dashboard is not None:
+            dashboard.resetting(robot)
+        env.reset_only()
+        if dashboard is not None:
+            dashboard.reset_done(robot)
+
+    def begin_resets():
+        check_session()
         logging.info('Split round %d: resetting %d robots while waiting for policy', round_id, len(envs))
-        return [reset_workers.submit(env.reset_only) for env in envs]
+        if dashboard is not None:
+            dashboard.set_phase('Reset + learner update / policy transfer')
+        return [reset_workers.submit(reset_robot, robot, env) for robot, env in enumerate(envs)]
 
     def check_reset_errors():
+        if dashboard is not None:
+            dashboard.check()
         for reset in resets:
             if reset.done():
                 reset.result()
@@ -306,11 +331,11 @@ def run_inference(flags, agent=None, env_factory=None):
     def finish_resets():
         pending = set(resets)
         while pending:
-            channel.check_session()
+            check_session()
             done, pending = wait(pending, timeout=.1, return_when=FIRST_COMPLETED)
             for reset in done:
                 reset.result()
-        channel.check_session()
+        check_session()
 
     def acknowledge_stop():
         channel.send('stopped', session, {'stopped': True})
@@ -318,9 +343,11 @@ def run_inference(flags, agent=None, env_factory=None):
         channel.wait_sent('stopped', session)
 
     try:
+        if dashboard is not None:
+            dashboard.start(flags.rollout_log)
         while True:
             if round_id:
-                prepare = channel.receive('prepare_reset', key(session, round_id))
+                prepare = channel.receive('prepare_reset', key(session, round_id), check=check_reset_errors)
                 channel.release('prepare_reset', key(session, round_id))
                 if prepare.get('stop'):
                     acknowledge_stop()
@@ -338,6 +365,8 @@ def run_inference(flags, agent=None, env_factory=None):
             version = admit['version']
             install_metrics = {}
             if installed != version:
+                if dashboard is not None:
+                    dashboard.set_phase('Receiving / installing policy')
                 with channel.receive_buffer('policy', key(session, version), check=check_reset_errors) as snapshot:
                     started = time.monotonic()
                     agent = import_policy(agent, snapshot, contract, version)
@@ -364,23 +393,37 @@ def run_inference(flags, agent=None, env_factory=None):
             channel.send('installed', key(session, round_id), {'version': version, 'timings': install_metrics})
             finish_resets()
             resets = []
+            if dashboard is not None:
+                dashboard.ready(round_id, version)
             def sample(observation):
                 nonlocal agent
                 actions, agent, _ = agent.sample_actions(observation)
                 return np.asarray(jax.device_get(actions))
             def transition(robot, step, record):
                 channel.send('transition', key(session, round_id, robot, step), {'version': version, 'transition': record})
+                if dashboard is not None:
+                    dashboard.step(robot, step + 1, record['is_hil'])
             def end(robot, length, success):
                 channel.send('episode_end', key(session, round_id, robot), {'version': version, 'length': length, 'success': bool(success)})
+                if dashboard is not None:
+                    dashboard.episode_done(robot, success)
             collect_round(envs, sample, flags.replan_steps, flags.config_task.control_hz,
                           mirror_robot=mirror_robot, on_transition=transition, on_episode_end=end,
-                          check_session=channel.check_session, reset_done=True)
+                          check_session=check_session, reset_done=True,
+                          **({'wait_for_start': dashboard.wait_for_start} if dashboard is not None else {}))
+            if dashboard is not None:
+                dashboard.set_phase('Both episodes done; waiting for learner / replay')
             channel.send('round_finished', key(session, round_id), {
                 'version': version, 'inference_rng': np.asarray(jax.device_get(agent.rng)).tolist(),
             })
             channel.flush()
             round_id += 1
+        if dashboard is not None:
+            dashboard.set_phase('Training complete')
     except BaseException:
+        if dashboard is not None:
+            dashboard.set_phase('Stopped / error; see inference log')
+            logging.exception('Inference stopped')
         # Interrupt reset RPC waits before publishing an abort (which itself may
         # be delayed by a failed transport). Already issued NUC motion cannot be undone.
         for env in envs:
@@ -394,5 +437,9 @@ def run_inference(flags, agent=None, env_factory=None):
             for env in envs:
                 env.close()
         finally:
-            reset_workers.shutdown(wait=True)
-            channel.close()
+            try:
+                reset_workers.shutdown(wait=True)
+                channel.close()
+            finally:
+                if dashboard is not None:
+                    dashboard.close()

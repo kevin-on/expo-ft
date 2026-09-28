@@ -372,6 +372,38 @@ The same `run_role.sh learner RUN` launches both ranks; inference stays single-n
 
 ## 7. Inspect, stop, restart
 
+### Interactive rollout control on ILIAD
+
+To control when each robot starts, set these in the deployed run profile:
+
+```bash
+ROLLOUT_DASHBOARD=true
+ROLLOUT_MODE=manual
+```
+
+Run the usual inference role in an interactive terminal; use `ssh -tt` on
+**each SSH hop**. The launcher supplies `srun --pty`. The two WS robot clients
+still run separately with their existing commands. This feature only changes
+the split inference process and works with either one or two learner nodes.
+
+- `0` / `1`: start the corresponding READY robot.
+- Space: start all READY robots.
+- `m`: switch auto/manual at runtime. Auto immediately releases waiting READY
+  robots; switching to manual leaves running episodes alone.
+- `q`: stop inference through the existing abort path; this does not request
+  a checkpoint. Request a checkpoint separately and wait for its saved message.
+
+The dashboard shows robot status, current step, completed episodes, success
+count/rate, latest result, elapsed time and human-controlled steps. Episode
+totals cover the current inference session. Detailed logs go to `inference.log`.
+In manual mode, new-policy installation and both resets finish before READY;
+the first fresh observation is read only after that robot is started. Reset
+remains automatic. Both episodes must finish before the next learner update.
+Start keys outside READY are ignored rather than queued for future rounds.
+Existing peer timeouts still apply while waiting for manual input.
+
+Without `ROLLOUT_DASHBOARD=true`, the existing automatic rollout stays unchanged.
+
 For a manual checkpoint, run this in a separate terminal on the learner's
 login node (from the deployed repo):
 

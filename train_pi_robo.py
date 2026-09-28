@@ -78,6 +78,9 @@ flags.DEFINE_string("dataset_path", "", "Path to preprocessed HDF5 demonstration
 flags.DEFINE_enum("split_role", "local", ["local", "learner", "inference"], "Separate learner/rollout processes using local shared-RAM transport.")
 flags.DEFINE_string("split_mailbox", "", "Local socket/marker directory shared with this machine's RAM transport process.")
 flags.DEFINE_string("split_session", "", "Fresh session ID shared by both roles; use a new ID after restarting a run.")
+flags.DEFINE_boolean("rollout_dashboard", False, "Interactive rollout controls in the split inference terminal.")
+flags.DEFINE_enum("rollout_mode", "auto", ["auto", "manual"], "Initial rollout start mode; manual requires rollout_dashboard.")
+flags.DEFINE_string("rollout_log", None, "Inference log file when using rollout_dashboard.")
 flags.DEFINE_float("split_timeout", 3600, "Maximum wait for peer progress, in seconds.")
 config_flags.DEFINE_config_file(
     "config",
@@ -96,6 +99,9 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     init_logging()
+    if FLAGS.rollout_dashboard or FLAGS.rollout_mode == "manual":
+        if FLAGS.split_role != "inference":
+            raise ValueError("Rollout dashboard/manual mode is supported on split inference only")
     from expo_ft.distributed.learner_group import initialize_learner, LearnerGroup
     initialize_learner(FLAGS)
     learner_group = LearnerGroup()

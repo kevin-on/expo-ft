@@ -13,6 +13,13 @@ SESSION=${SPLIT_SESSION:-$RUN}
 [[ "$SESSION" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$ ]] || { echo "Invalid SPLIT_SESSION" >&2; exit 2; }
 NODE_COUNT=1
 RANK=0
+DASHBOARD=false
+PTY=()
+if [[ "$ROLE" == inference && ${ROLLOUT_DASHBOARD:-false} == true ]]; then
+    DASHBOARD=true
+    [[ -t 0 && -t 1 ]] || { echo 'Inference dashboard requires ssh -tt' >&2; exit 2; }
+    PTY=(--pty)
+fi
 if [[ "$ROLE" == learner ]]; then
     JOB=$DELTA_JOB; NODE=$DELTA_NODE; STAGE=$DELTA_STAGE; IMAGE=$DELTA_IMAGE
     SOURCE=$DELTA_SOURCE; PERSIST=$DELTA_RUN
@@ -45,7 +52,7 @@ if ! "$COMPUTE"; then
     fi
     echo "Starting $ROLE on $NODE in job $JOB; source=$SOURCE output=$PERSIST"
     exec srun --jobid="$JOB" --exact -N"$NODE_COUNT" -n"$NODE_COUNT" -w "$NODE" "${RESOURCES[@]}" \
-        --time="$STEP_TIME" bash "$LAUNCH_DIR/run_role.sh" --compute "$ROLE" "$RUN" "$PROFILE"
+        --time="$STEP_TIME" "${PTY[@]}" bash "$LAUNCH_DIR/run_role.sh" --compute "$ROLE" "$RUN" "$PROFILE"
 fi
 mapfile -t EXPECTED_NODES < <(scontrol show hostnames "$NODE")
 if [[ "$ROLE" == learner ]]; then RANK=${SLURM_PROCID:-0}; fi
@@ -166,9 +173,18 @@ if [[ "$ROLE" == learner ]]; then
         --checkpoint_interval="$CHECKPOINT_INTERVAL" --project_name="$WANDB_PROJECT" --output_dir=/output)
 else
     ARGS+=(--client_host=0.0.0.0 --client_port="$CLIENT_PORT" --output_dir="$WS_VIDEO_ROOT")
+    if "$DASHBOARD"; then
+        ARGS+=(--rollout_dashboard --rollout_mode="${ROLLOUT_MODE:-manual}" --rollout_log="/output/$RUN/inference.log")
+    fi
 fi
 # Keep the application PID (not a tee pipeline PID) for signal cleanup.
-"${GPU[@]}" python -u train_pi_robo.py "${ARGS[@]}" > >(tee "$PERSIST/$LOG_NAME.log") 2>&1 &
+if "$DASHBOARD"; then
+    # Explicit stdin redirection preserves the PTY for a background child.
+    # Keep stderr/model logs out of the dashboard's terminal output.
+    "${GPU[@]}" python -u train_pi_robo.py "${ARGS[@]}" <&0 2>>"$PERSIST/$LOG_NAME.log" &
+else
+    "${GPU[@]}" python -u train_pi_robo.py "${ARGS[@]}" > >(tee "$PERSIST/$LOG_NAME.log") 2>&1 &
+fi
 APP_PID=$!
 set +e
 wait "$APP_PID"
