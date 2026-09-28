@@ -67,9 +67,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
         prepare_robot_replay_resume(directory, up_to_step=step, num_robot=len(buffers),
                                    abandoned_dir=directory / 'abandoned-replay' / session)
         for index, buffer in enumerate(buffers):
-            # These are executed actions, so an all-minus-one command is not a dummy.
-            restore_replay_buffer(directory / f'robot-{index}', buffer, up_to_step=start_step,
-                                  skip_dummy_actions=False)
+            restore_replay_buffer(directory / f'robot-{index}', buffer, up_to_step=start_step)
             buffer.restore_success_marks()
     version = step
     policy_started = time.monotonic()

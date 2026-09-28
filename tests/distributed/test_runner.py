@@ -19,7 +19,7 @@ from expo_ft.distributed import runner
 
 
 class ResumeTest(unittest.TestCase):
-    def test_resume_uses_checkpoint_cursor_and_keeps_executed_minus_one_actions(self):
+    def test_resume_uses_checkpoint_cursor_and_default_dummy_filter(self):
         @dataclass
         class Agent:
             rng: object
@@ -57,8 +57,8 @@ class ResumeTest(unittest.TestCase):
                 if topic == 'stopped':
                     return {'stopped': True}
                 raise AssertionError(topic)
-        def record(done=False):
-            return dict(actions=-np.ones(7), observations={}, rewards=0., masks=float(not done),
+        def record(done=False, dummy=False):
+            return dict(actions=-np.ones(7) if dummy else np.zeros(7), observations={}, rewards=0., masks=float(not done),
                         dones=done, is_hil=True, is_success=True)
         with tempfile.TemporaryDirectory() as directory, ExitStack() as patches:
             path = Path(directory)
@@ -66,16 +66,17 @@ class ResumeTest(unittest.TestCase):
             for step in range(1, 46):
                 dest = path / f'robot-{((step-1)//2)%2}' / 'buffers' / f'{step:012d}.pkl'
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(pickle.dumps(record(step % 2 == 0)))
+                dest.write_bytes(pickle.dumps(record(step % 2 == 0, dummy=step == 1)))
             state = dict(identity={'test': True}, episode_count=22, pending_steps=0,
                          combine_rng=[1, 2], inference_rng=[3, 4], last_session='old', last_round=10)
             (path / 'split-44.json').write_text(json.dumps(state))
             task = SimpleNamespace(control_hz=10, language_instruction='test', action_space='cartesian_velocity', gripper_action_space='velocity')
             flags = SimpleNamespace(split_session='new', config_task=task, num_robot=2, seed=42,
                 replan_steps=8, max_steps=48, num_updates=3, step_interval=1, batch_size=2, utd_ratio=1,
+                split_warmup_episodes=10,
                 checkpoint_buffer=True, checkpoint_model=True, checkpoint_interval=0)
             def batch(rng):
-                self.assertEqual([len(b.rows) for b in buffers], [24, 24])
+                self.assertEqual([len(b.rows) for b in buffers], [23, 24])
                 return {}, None, rng
             manager = SimpleNamespace(wait_until_finished=lambda: None)
             saved = []
