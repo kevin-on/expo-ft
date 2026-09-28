@@ -17,6 +17,7 @@ from .channel import Channel, atomic_json
 from .policy import export_policy, import_policy, identity
 from .protocol import key, receive_round, task_contract
 from .learner_group import LearnerGroup, local_value, replicate
+from expo_ft.utils.log_utils import InterventionStats
 
 
 def _channel(flags):
@@ -63,6 +64,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
     if group.call(lambda: contract) != contract:
         raise ValueError('learner nodes have different policy identities')
     episode_count, pending_steps, step, round_id = 0, 0, start_step, 0
+    intervention_stats = InterventionStats(len(buffers))
     combine_rng = jax.random.PRNGKey(flags.seed + 100)
     inference_rng = None
     if resuming:
@@ -72,6 +74,9 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
         if state['last_session'] == session:
             raise ValueError('resume requires a fresh session ID')
         episode_count, pending_steps = state['episode_count'], state['pending_steps']
+        intervention_stats = InterventionStats(len(buffers), state.get('intervention_stats'))
+        if 'intervention_stats' not in state and group.leader:
+            logging.warning('Checkpoint has no intervention totals; counting from this resume onward')
         combine_rng = replicate(np.asarray(state['combine_rng'], dtype=np.uint32), replicated_sharding)
         inference_rng = state['inference_rng']
         group.call(lambda: prepare_robot_replay_resume(
@@ -102,6 +107,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             'identity': contract, 'episode_count': episode_count, 'pending_steps': pending_steps,
             'combine_rng': local_value(combine_rng).tolist(),
             'inference_rng': inference_rng, 'last_session': session, 'last_round': round_id,
+            'intervention_stats': intervention_stats.state_dict(),
         }))
         save_checkpoint(checkpoint_manager, agent, step)
 
@@ -191,6 +197,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             if count:
                 metrics['split/update_seconds'] = update_finished - update_started
             episode_count += len(episodes)
+            intervention_stats.on_round_done(episodes, metrics)
             metrics.update(episodes=episode_count, updates=count, round_steps=round_steps, policy_version=version)
             # Leave this step open for the next installed-policy timing ACK.
             # Otherwise W&B discards that second log at the already-committed step.

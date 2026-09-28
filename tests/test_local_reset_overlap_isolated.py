@@ -133,6 +133,7 @@ class LocalOverlapTests(unittest.TestCase):
                   save_replay_buffer_batch=save,
                   wandb=NS(log=lambda metrics, step: logs.append((step, dict(metrics)))))
         load_definitions('expo_ft/utils/robot_round.py', ['updates_for_round'], ns)
+        load_definitions('expo_ft/utils/log_utils.py', ['InterventionStats'], ns)
         load_definitions('expo_ft/utils/multi_robot_training.py', ['train_multi_robot'], ns)
         flags = NS(seed=1, max_steps=2 * rounds, replan_steps=8, client_host='', client_port=8102,
                    config_task=NS(example_action=[], control_hz=10), batch_size=1,

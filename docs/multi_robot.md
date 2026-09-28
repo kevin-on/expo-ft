@@ -144,6 +144,15 @@ checks camera streams and must not run while collection owns them.
 
 ## Verification
 
+Local and split learners log intervention metrics after each completed round.
+`robot-N/intervention_rate` is that episode's `is_hil` count divided by its
+length; `training/intervention_rate` combines all robots' human steps and
+total steps (not the mean of their ratios). Both prefixes also report cumulative
+`episodes_with_intervention` and `total_intervention_transitions`. Counts include
+online warmup episodes, not seeded demos or replay samples. New checkpoint
+ledgers preserve these totals across resume; old ledgers without them log a
+warning and start the counters at zero.
+
 See [tests/README.md](../tests/README.md). Mocked client tests exercise routing,
 reset/vertical/bounds/recording behavior without devices. CPU replay/RPC tests
 cover barriers, mixing, executed actions and persistence. GPU mock tests cover

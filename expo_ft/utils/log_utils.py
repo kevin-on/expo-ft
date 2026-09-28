@@ -7,6 +7,38 @@ from typing import Any, List, Optional
 import numpy as np
 
 
+class InterventionStats:
+    """Online episode counts per robot; demos and replay sampling are excluded."""
+
+    def __init__(self, num_robot, state=None):
+        state = state or {}
+        self.episodes = list(state.get("episodes_with_intervention", [0] * num_robot))
+        self.transitions = list(state.get("total_intervention_transitions", [0] * num_robot))
+
+    def state_dict(self):
+        return {"episodes_with_intervention": list(self.episodes),
+                "total_intervention_transitions": list(self.transitions)}
+
+    def on_round_done(self, episodes, metrics):
+        human_steps, total_steps = 0, 0
+        for robot, (records, _) in enumerate(episodes):
+            human = sum(bool(record.get("is_hil", False)) for record in records)
+            self.episodes[robot] += int(human > 0)
+            self.transitions[robot] += human
+            human_steps += human
+            total_steps += len(records)
+            metrics.update({
+                f"robot-{robot}/intervention_rate": human / len(records) if records else 0.0,
+                f"robot-{robot}/episodes_with_intervention": self.episodes[robot],
+                f"robot-{robot}/total_intervention_transitions": self.transitions[robot],
+            })
+        metrics.update({
+            "training/intervention_rate": human_steps / total_steps if total_steps else 0.0,
+            "training/episodes_with_intervention": sum(self.episodes),
+            "training/total_intervention_transitions": sum(self.transitions),
+        })
+
+
 @dataclass
 class EpisodeState:
     ep_return: float = 0.0
