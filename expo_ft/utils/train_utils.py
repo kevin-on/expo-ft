@@ -2,6 +2,7 @@
 
 import dataclasses
 import logging
+import os
 import pathlib
 from typing import Any, Dict
 
@@ -106,7 +107,14 @@ def set_compilation_cache_dir(tag: str) -> str:
     runs that place the same computation on the same device, so scope the dir by
     driver, learner, and device count (all three decide those placements).
     """
-    cache_dir = epath.Path("~/.cache/jax").expanduser() / f"{tag}-n{jax.device_count()}"
+    if jax.process_count() > 1:
+        shared_cache = os.environ.get('JAX_COMPILATION_CACHE_DIR')
+        if not shared_cache:
+            raise ValueError('Multi-host learner requires JAX_COMPILATION_CACHE_DIR on shared storage')
+        root = epath.Path(shared_cache)
+    else:
+        root = epath.Path("~/.cache/jax").expanduser()
+    cache_dir = root / f"{tag}-n{jax.device_count()}"
     jax.config.update("jax_compilation_cache_dir", str(cache_dir))
     logging.info("JAX compilation cache: %s", cache_dir)
     return str(cache_dir)

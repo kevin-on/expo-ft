@@ -12,6 +12,15 @@ ordering and recovery. [Robot configuration](../../docs/multi_robot.md) explains
 mirror, replay and hardware routing. [Test inventory](../../tests/README.md)
 separates regressions from GPU and hardware checks.
 
+**Two-node / eight-GH200 learner:** follow the
+[two-node guide](../../docs/multinode_learner.md) before using this recipe.
+The commands below launch a **one-node** learner. Setting `DELTA_GPUS=8` in
+this profile does not enable two-node execution; that needs one JAX process
+per node, distributed initialization and the fabric/container bindings.
+The two-node changes currently live in the `multi-node-learner` worktree at
+`/scr/kevinon/workspace/expo-ft-multinode`; do not assume the main fork checkout
+or an older prepared source snapshot already contains them.
+
 ## 1. Establish the current state
 
 On WS (lightweight commands only):
@@ -366,9 +375,10 @@ assume node-local `/tmp` is persistent.
   `through_inference_ready_seconds` spans update end through snapshot export,
   hash/handoff, receive/verify, GPU installation and installed ACK. It excludes
   rollout and does not assert that physical reset has finished.
-- Latest five-cycle median: 47.68s total, 8.07s rollout, 26.27s three updates,
+- Historical one-node five-cycle median (2026-09-27): 47.68s total, 8.07s rollout, 26.27s three updates,
   9.52s update-end→ACK; receive 7.68s, GPU installation 0.21s. Mock execution is
-  not proof of physical reset timing or task success.
+  not proof of physical reset timing or task success. See the two-node guide
+  for the separate 2026-09-28 eight-GPU results and their measurement scope.
 - Stop robot clients first if running, then stop only the two role commands/test
   steps. Their handlers stop their own model/mock/transport children. Keep the
   relay and WS agent for sequential runs on the same hosts/ports.

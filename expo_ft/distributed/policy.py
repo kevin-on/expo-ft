@@ -14,6 +14,7 @@ import jax
 import numpy as np
 
 from .buffer import Buffer
+from .learner_group import local_value
 
 
 # Versioned, uncompressed wire format: header, aligned C-order array bytes,
@@ -94,7 +95,7 @@ def identity(agent, task_contract):
     _, frozen = agent.actor_train_state.params.split(agent.actor.train_config.trainable_filter, ...)
     h = hashlib.sha256()
     for path, value in _leaves(frozen.to_pure_dict()):
-        a = np.asarray(jax.device_get(value))
+        a = local_value(value)
         h.update(json.dumps([path, a.shape, a.dtype.name]).encode())
         h.update(a.tobytes())
     stats = hashlib.sha256()
@@ -126,7 +127,7 @@ def export_policy(agent, contract, version):
             stream.write(bytes(_ALIGNMENT))
             for group, tree in parameter_trees(agent).items():
                 for keys, value in _leaves(tree):
-                    array = np.asarray(jax.device_get(value))
+                    array = local_value(value)
                     if array.dtype.hasobject or array.dtype.fields is not None or not array.dtype.isnative:
                         raise ValueError('unsupported snapshot array dtype')
                     if not array.flags.c_contiguous:

@@ -96,6 +96,9 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     init_logging()
+    from expo_ft.distributed.learner_group import initialize_learner, LearnerGroup
+    initialize_learner(FLAGS)
+    learner_group = LearnerGroup()
     split = FLAGS.split_role != "local"
     if split:
         if (FLAGS.config.model_cls != "EXPOLearner" or FLAGS.update_type != "episode"
@@ -148,11 +151,12 @@ def main(_):
     )
 
     log_dir = os.path.join(FLAGS.output_dir, FLAGS.run_name)
-    os.makedirs(log_dir, exist_ok=True)
     train_video_dir = os.path.join(log_dir, "train_videos")
-    os.makedirs(train_video_dir, exist_ok=True)
     checkpoint_dir = os.path.join(log_dir, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    if learner_group.leader:
+        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(train_video_dir, exist_ok=True)
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
     checkpoint_dir_path = epath.Path(checkpoint_dir)
     checkpoint_manager, resuming = initialize_checkpoint_dir(
@@ -162,8 +166,9 @@ def main(_):
         resume=FLAGS.resume,
     )
 
-    init_wandb(checkpoint_dir_path, resuming, FLAGS.project_name, FLAGS.run_name)
-    wandb.config.update(FLAGS.flag_values_dict(), allow_val_change=resuming)
+    if learner_group.leader:
+        init_wandb(checkpoint_dir_path, resuming, FLAGS.project_name, FLAGS.run_name)
+        wandb.config.update(FLAGS.flag_values_dict(), allow_val_change=resuming)
 
     if FLAGS.config_task.env_type == "droid":
         dataset = process_droid_dataset(
@@ -204,29 +209,36 @@ def main(_):
         capacity=FLAGS.max_steps,
         task_description=task_description,
         replan_steps=FLAGS.replan_steps,
-        seed=FLAGS.seed,
+        seed=FLAGS.seed + 100003 * jax.process_index(),
         delay=FLAGS.delay,
         critic_camera_keys=critic_camera_keys,
     )
     replay_buffer = create_replay_buffer(**rb_args)
     replay_buffers = [replay_buffer]
     if multi_robot:
-        replay_buffers += [create_replay_buffer(**{**rb_args, "seed": FLAGS.seed + index})
+        replay_buffers += [create_replay_buffer(**{**rb_args, "seed": rb_args["seed"] + index})
                            for index in range(1, FLAGS.num_robot)]
     offline_replay_buffer = create_replay_buffer(**rb_args)
 
     actor_success_only = getattr(FLAGS.config, "actor_success_only", False)
+    distributed_sampler = None
+    if learner_group.size > 1:
+        from expo_ft.data.distributed_sampler import DistributedReplaySampler
+        distributed_sampler = DistributedReplaySampler(seed=FLAGS.seed, global_batch_size=FLAGS.batch_size,
+            rank=jax.process_index(), world_size=learner_group.size)
     batch_processor = BatchProcessor(
         replay_buffer=replay_buffer,
         offline_replay_buffer=offline_replay_buffer,
         data_sharding=data_sharding,
-        batch_size=FLAGS.batch_size,
+        batch_size=FLAGS.batch_size // learner_group.size,
         utd_ratio=FLAGS.utd_ratio,
         offline_ratio=FLAGS.offline_ratio,
         actor_success_only=actor_success_only,
         use_dagger_hil_sampling=use_dagger_hil_sampling,
         dataset=dataset,
         replay_buffers=replay_buffers if multi_robot else None,
+        utd_axis=learner_group.size > 1,
+        distributed_sampler=distributed_sampler,
     )
 
     example_buffer = replay_buffer if multi_robot and FLAGS.offline_ratio == 0 else offline_replay_buffer

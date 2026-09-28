@@ -22,6 +22,10 @@ roles, authorized robot startup, mock verification and cleanup. The current
 workstation checkout is `/scr/kevinon/workspace/expo-ft-fork` on `multi-robot`.
 [Robot configuration](docs/multi_robot.md), [split architecture](docs/split_training.md)
 and [test inventory](tests/README.md) provide the implementation details.
+For a DeltaAI learner on **two nodes / eight GH200s**, use the
+[two-node learner guide](docs/multinode_learner.md). It documents the distributed
+sampler, container/network setup, tested mock commands and production-launcher
+status. The existing `scripts/split/run_role.sh` remains a one-node launcher.
 The paper's generic EXPO/RTC examples below are not the current cluster profile.
 
 ## Setup

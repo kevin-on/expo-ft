@@ -1,10 +1,20 @@
 """Image augmentation utilities for Pi training."""
 
 from typing import Callable, Dict
+import math
 
 import augmax
 import jax
 import jax.numpy as jnp
+
+
+def _map_images(transform, keys, images):
+    """Map over B or (UTD, B), preserving image shards and flat RNG order."""
+    batch_shape = images.shape[:-3]
+    keys = keys.reshape(batch_shape + keys.shape[1:])
+    for _ in batch_shape:
+        transform = jax.vmap(transform)
+    return transform(keys, images)
 
 
 def batched_openpi_augmentation(rng, image_dict: Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
@@ -16,7 +26,7 @@ def batched_openpi_augmentation(rng, image_dict: Dict[str, jnp.ndarray]) -> Dict
     """
     base = image_dict["base_0_rgb"]
     wrist = image_dict["left_wrist_0_rgb"]
-    height, width = base.shape[1], base.shape[2]
+    height, width = base.shape[-3], base.shape[-2]
 
     base = base / 2.0 + 0.5
     wrist = wrist / 2.0 + 0.5
@@ -34,12 +44,12 @@ def batched_openpi_augmentation(rng, image_dict: Dict[str, jnp.ndarray]) -> Dict
         augmax.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
     ]
 
-    sub_rngs = jax.random.split(rng, 2 * base.shape[0])
+    sub_rngs = jax.random.split(rng, 2 * math.prod(base.shape[:-3]))
     base_rngs = sub_rngs[0::2]
     wrist_rngs = sub_rngs[1::2]
 
-    base = jax.vmap(augmax.Chain(*base_transforms))(base_rngs, base)
-    wrist = jax.vmap(augmax.Chain(*wrist_transforms))(wrist_rngs, wrist)
+    base = _map_images(augmax.Chain(*base_transforms), base_rngs, base)
+    wrist = _map_images(augmax.Chain(*wrist_transforms), wrist_rngs, wrist)
 
     base = base * 2.0 - 1.0
     wrist = wrist * 2.0 - 1.0
@@ -68,11 +78,12 @@ def batched_random_crop_per_image(key, obs: jnp.ndarray, padding: int = 4) -> jn
     """
     base = obs[..., :3]
     wrist = obs[..., 3:6]
-    keys = jax.random.split(key, 2 * obs.shape[0])
+    keys = jax.random.split(key, 2 * math.prod(obs.shape[:-3]))
     keys_base = keys[0::2]
     keys_wrist = keys[1::2]
-    base = jax.vmap(random_crop, (0, 0, None))(keys_base, base, padding)
-    wrist = jax.vmap(random_crop, (0, 0, None))(keys_wrist, wrist, padding)
+    crop = lambda key, image: random_crop(key, image, padding)
+    base = _map_images(crop, keys_base, base)
+    wrist = _map_images(crop, keys_wrist, wrist)
     return jnp.concatenate([base, wrist], axis=-1)
 
 

@@ -27,7 +27,14 @@ class BatchProcessor:
         use_dagger_hil_sampling: bool,  # True for RTCLearner: actor batch from HIL chunks only
         dataset=None,
         replay_buffers=None,
+        utd_axis=False,
+        distributed_sampler=None,
     ):
+        if distributed_sampler is not None:
+            if not utd_axis or replay_buffers is None or offline_ratio != 0 or use_dagger_hil_sampling:
+                raise ValueError('Distributed replay sampling requires UTD layout and online robot buffers')
+            if distributed_sampler.local_batch_size != batch_size:
+                raise ValueError('Sampler and processor local batch sizes differ')
         if dataset is not None:
             # offline_ratio=0: seed demos into the online replay buffer only.
             if offline_ratio == 0 or use_dagger_hil_sampling:
@@ -40,6 +47,8 @@ class BatchProcessor:
         self.data_sharding = data_sharding
         self.batch_size = batch_size
         self.utd_ratio = utd_ratio
+        self.utd_axis = utd_axis
+        self.distributed_sampler = distributed_sampler
         self.offline_ratio = offline_ratio
         self.actor_success_only = actor_success_only
         self.use_dagger_hil_sampling = use_dagger_hil_sampling
@@ -101,9 +110,14 @@ class BatchProcessor:
         restore_replay_buffer(checkpoint_dir, self.replay_buffer, up_to_step=up_to_step)
         self.replay_buffer.restore_success_marks()
 
-    def next_batch(self, combine_rng):
+    def next_batch(self, combine_rng, *, update_step=None):
         """Return (critic_batch, actor_batch, new_rng) for one update step."""
-        if self.replay_buffers is not None and self.offline_ratio == 1 and not self.use_dagger_hil_sampling:
+        if self.distributed_sampler is not None:
+            if update_step is None:
+                raise ValueError('Distributed sampler requires the restored learner update step')
+            batch = self._sample_distributed(update_step, self.utd_ratio)
+            new_rng = combine_rng
+        elif self.replay_buffers is not None and self.offline_ratio == 1 and not self.use_dagger_hil_sampling:
             batch = next(self.offline_iterator)
             new_rng = combine_rng
         elif self.use_dagger_hil_sampling or self.offline_ratio == 0:
@@ -117,14 +131,23 @@ class BatchProcessor:
             clear_batch(online_batch)
             clear_batch(offline_batch)
 
-        batch = self.replay_buffer.apply_data_sharding(batch, self.data_sharding)
+        critic_sharding = self.data_sharding
+        if self.utd_axis:
+            batch = jax.tree.map(
+                lambda x: x.reshape((self.utd_ratio, -1) + x.shape[1:]), batch)
+            critic_sharding = jax.sharding.NamedSharding(
+                self.data_sharding.mesh,
+                jax.sharding.PartitionSpec(None, self.data_sharding.spec[0]))
+        batch = self.replay_buffer.apply_data_sharding(batch, critic_sharding)
 
         actor_batch = None
         if self.use_dagger_hil_sampling:
             actor_batch = next(self.hil_iterator)
             actor_batch = self.replay_buffer.apply_data_sharding(actor_batch, self.data_sharding)
         elif self.actor_success_only:
-            actor_batch = self._sample_success_actor_batch(new_rng)
+            actor_batch = (self._sample_distributed(update_step, 1, success_only=True)
+                           if self.distributed_sampler is not None
+                           else self._sample_success_actor_batch(new_rng))
             if actor_batch is not None:
                 new_rng_parts = jax.random.split(new_rng)
                 new_rng = new_rng_parts[0]
@@ -133,6 +156,35 @@ class BatchProcessor:
                 )
 
         return batch, actor_batch, new_rng
+
+    def _sample_distributed(self, update_step, num_batches, *, success_only=False):
+        candidates = [b.sampling_candidates(success_only=success_only) for b in self.replay_buffers]
+        selected = self.distributed_sampler.sample(
+            candidates, update_step=update_step, num_batches=num_batches,
+            stream='actor' if success_only else 'critic')
+        if selected is None:
+            if success_only:
+                return None
+            raise ValueError('No eligible robot replay samples available')
+        selected = selected.reshape(-1, 2)
+        size = len(selected)
+        if size not in self._robot_batches:
+            self._robot_batches[size] = self.replay_buffer.allocate_sample_batch(size)
+        storage = self._robot_batches[size]
+        # Gather each robot into contiguous reusable slices, then restore the
+        # sampler's minibatch order. Images are read once per selected row.
+        order = np.argsort(selected[:, 0], kind='stable')
+        start = 0
+        for robot, buffer in enumerate(self.replay_buffers):
+            n = int(np.count_nonzero(selected[:, 0] == robot))
+            if n:
+                stop = start + n
+                buffer.sample_by_indices(selected[order[start:stop], 1],
+                    out={key: value[start:stop] for key, value in storage.items()})
+                start = stop
+        inverse = np.argsort(order)
+        raw = jax.tree.map(lambda value: value[inverse], storage)
+        return self.replay_buffer._convert_to_openpi_format(raw)
 
     def _sample_buffer(self, buffer, batch_size, **sample_kwargs):
         if buffer is self.replay_buffer and self.replay_buffers is not None:

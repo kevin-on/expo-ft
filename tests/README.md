@@ -10,6 +10,7 @@ is authorized to access physical hardware merely because it is named a test.
 | Location | Purpose / dependencies |
 | --- | --- |
 | `cpu/` | Replay mixing and restore, multi-robot barriers/RPC, mirror/eval/config and conversion; Python3.11, `cpu/requirements.txt`, openpi-client; CPU JAX |
+| `cpu/test_distributed_sampler.py` | Global minibatch uniqueness, small/empty pools, rank slices, success filtering, batch order and replay-restore reproduction |
 | `distributed/` `test_*.py` | RAM transport, TLS, corruption/failover, relay supervision, policy contract, cancellation and checkpoint resume; standard unittest, xxhash/numpy/websockets as used by each test |
 | `../client/tests/` | Mocked HID/camera/RPC, teleop vertical/bounds/reset, collection persistence/video; client test dependencies, no device access |
 | `test_async_video_isolated.py` | Video ownership/backpressure/drain, terminal response before encoding completes |
@@ -51,6 +52,10 @@ suffice for documentation-only edits.
 - `distributed/benchmark_transport.py`: isolate RAM/TLS transport throughput and
   verification from model execution. Only run with an isolated test mailbox and
   free endpoints; do not attach it to a live training sidecar.
+- `gpu/multinode_update.py`: actual 4/8-GPU collective/control and fixed-global-
+  batch update checks. `gpu/multinode_validation/` contains the dated allocation
+  launch recipe. See [two-node learner](../docs/multinode_learner.md) for ownership,
+  batch semantics, environment and full-iteration verification.
 
 Pass explicit inputs/output directories and inspect each tool's `--help` on the
 appropriate compute node. GPU tests must not be launched by routine test discovery.
@@ -64,6 +69,10 @@ old incompatible OpenPI version were removed. Git history preserves them.
 Current GPU and CPU regression coverage remains. TPU support in application
 code is not removed; it would need a newly validated environment/launcher.
 
-Latest evidence is at
-`/scr/kevinon/workspace/expo-ft-validation/20260927-fork-10hz-5/REPORT.md`.
-Keep that bundle and live relay auxiliary files; they are not disposable logs.
+Retained evidence, with distinct scopes:
+
+- One-node fork deployment: `/scr/kevinon/workspace/expo-ft-validation/20260927-fork-10hz-5/REPORT.md`.
+- Matched four/eight-GPU comparison: `/scr/kevinon/workspace/expo-ft-validation/20260928-gh200x8/REPORT.md`.
+- Distributed sampler and final eight-GPU run: `/scr/kevinon/workspace/expo-ft-validation/20260928-distributed-sampler/REPORT.md`.
+
+Keep these bundles and live relay auxiliary files; they are not disposable logs.

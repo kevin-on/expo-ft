@@ -2,6 +2,10 @@
 
 For execution and handoff, start with the [operating guide](../scripts/split/README.md).
 This document describes the current implementation, not historical experiments.
+For a learner spanning two GPU nodes, see the
+[two-node guide](multinode_learner.md). Rank 0 owns the WAN connection and replay
+files; both ranks hold replay and run updates/checkpoint collectives. Inference
+and the WS protocol remain unchanged.
 
 This is an opt-in path in `train_pi_robo.py`. `--split_role=local` (the default)
 keeps the existing single-process behavior. The split path supports synchronous
