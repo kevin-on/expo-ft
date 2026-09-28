@@ -1,6 +1,7 @@
 # Separate learner and inference machines
 
-For the prepared DeltaAI/ILIAD deployment, see the [machine launch scripts](../scripts/split/README.md).
+For execution and handoff, start with the [operating guide](../scripts/split/README.md).
+This document describes the current implementation, not historical experiments.
 
 This is an opt-in path in `train_pi_robo.py`. `--split_role=local` (the default)
 keeps the existing single-process behavior. The split path supports synchronous
@@ -94,7 +95,7 @@ be cancelled by closing a connection. **Robots now move during the update interv
 
 Deploy these changes to learner, inference and both WS clients together. The NUC
 DROID server, OpenPI and WAN transport/relay implementation do not need changes.
-The non-split/local training loop, collection and evaluation keep ordinary reset.
+Collection and evaluation keep ordinary reset. Local multi-robot training also overlaps reset and update (see below).
 No hardware validation is implied by the isolated tests:
 `python3 -B tests/test_split_reset_overlap_isolated.py` uses only the standard
 library, in-memory peers and fake robots (no sockets, GPU or hardware imports).
@@ -114,8 +115,9 @@ still runs when the next episode ends, submission explicitly waits and logs a
 backlog warning rather than accumulating unbounded full-resolution video in RAM.
 Normal environment close/disconnect drains the writer; forced process termination
 cannot guarantee unfinished files are saved. Encoding errors remain nonfatal and
-are logged, as in the synchronous path. Collection, evaluation and non-split
-training retain their default synchronous video behavior.
+are logged, as in the synchronous path. Collection has its own asynchronous persistence worker; evaluation and single-robot
+training retain their default video behavior. Local multi-robot training requests
+the same background video writer as split training.
 
 `python3 -B tests/test_async_video_isolated.py` checks terminal response while the
 encoder is blocked, detached buffer ownership, bounded backlog, close/drain and
@@ -218,8 +220,8 @@ storage; they are not snapshot transport spools.
   and sidecars must use this version together, with a fresh session/mailbox when
   upgrading from SHA-256 payloads. Legacy payload metadata is rejected. Message IDs
   and model/normalization fingerprints still use SHA-256. TLS/SSH security is unchanged.
-  This replaces the checksum algorithm only; streaming verification/export is not
-  implemented. DeltaAI hashing was benchmarked; cross-host ILIAD validation is pending.
+  Streaming verification/export is not implemented. The current cross-host
+  path is covered by the recorded-data verification in the operating guide.
 
 ### Timing
 
@@ -228,7 +230,7 @@ The learner logs `POLICY_READY` and `split/*` W&B metrics:
 - `update_seconds`: the round's actual update calls, including batch preparation
   and waiting for update results.
 - `export_seconds`: GPU-to-host parameter gathering and RAM serialization.
-- `hash_handoff_seconds`: sender SHA-256 and local descriptor publication.
+- `hash_handoff_seconds`: sender XXH3-128 and local descriptor publication.
 - `receive_seconds` / `verify_seconds`: receiver range transfer and full-buffer
   verification, measured on that receiver's own monotonic clock.
 - `install_seconds`: deserialize, validate and install on the inference GPU,
@@ -374,279 +376,20 @@ host/ports (8102/8103 in this example). Video paths still refer to the workstati
 that writes the videos. Creating real client environments can launch/reset
 controllers: preparing GPU roles does not authorize starting robot clients.
 
-## Validation commands
+## Verification
 
-Run these only on an idle, authorized test allocation, not a live robot WS:
+See the [test inventory](../tests/README.md) for regression and integration commands,
+and the [operating guide](../scripts/split/README.md#6-robot-free-10hz-verification)
+for the current two-machine deployment and exact mock rerun procedure.
 
-```bash
-JAX_PLATFORMS=cpu python -m unittest discover -s tests/distributed -v
-python tests/gpu/split_smoke.py --dataset RECORDED_DEMO \
-  --params PI05_BASE_PARAMS --output NEW_TEST_OUTPUT
-```
-
-The GPU test has two independent model processes and two real socket transports,
-but substitutes a recorded-observation environment. It tests 24 episodes, warmup,
-two real updates, a new snapshot installation, fixed-RNG action parity with the
-learner, and checkpoint save/restore. It uses batch 2, UTD 1, N=2/edit=2 to keep
-validation short; it is not a throughput benchmark or a cross-cluster link test.
-
-### Previous disk-spool validation — 2026-09-25 (superseded transport)
-
-Implementation starts from EXPO-FT `b6ce2432a0ea493d976ad769fe1231cc0cb01a20`,
-with OpenPI `5f1c132e36098dba55bc21a042dbef5d3b539fec`, JAX 0.5.3, ARM runtime
-on DeltaAI GH200 allocation `3221988`, node `gh138`.
-
-- `tests/distributed`: 14 passed (TCP and TLS transfer/reconnect, complete-round
-  admission, mirrored executed/HIL actions, resume cursor, and mocked bidirectional
-  32-SSH command construction).
-- Existing `tests/cpu/test_mirror_online.py`: 2 passed.
-- GPU integration: 24 recorded-observation episodes / 384 transitions, batch 2,
-  UTD 1, N=2/edit=2, two real updates, policy versions 0 and 352. Both installed
-  policies matched learner actions with the same RNG (`rtol=1e-4, atol=1e-5`).
-  Checkpoint 384 restored with actor step 2. Final snapshot size: 2,017,585,738
-  bytes. The final integration step exited 0.
-- Existing pytest-based replay/round suite was not run: this runtime does not
-  contain pytest. No runtime dependency installation was performed.
-- No WS hardware, robot RPC, camera, ILIAD process, or ILIAD connection was used.
-  Production cross-cluster routing and WAN throughput for this implementation
-  remain unvalidated; all real socket tests ran within the DeltaAI compute node.
-  No performance claim is made for batch 64, multi-GPU, or physical robot control.
-
-Evidence is retained on shared storage under
-`/work/hdd/bgqe/kon/expo-ft/split-validation-20260925/`: `gpu-final/` (model logs,
-checkpoint and `test/PASSED.json`), `gpu-final.log`, `final-checks-3.log`, and the
-tested `source/`. Test steps and listeners were stopped; the held allocation was
-preserved.
-
-### RAM benchmark
-
-On an authorized idle test node, with the same actual snapshot used previously:
-
-```bash
-python tests/distributed/benchmark_transport.py --payload SNAPSHOT.npz \
-  --output NEW_RESULT_DIR --connections 64 --trials 3
-```
-
-This starts two TLS sidecars and two independent application processes, loads the
-source once before timing, verifies every reconstructed buffer and releases it.
-It writes only logs/results, not payload files. For an authorized cross-cluster
-comparison, provision the regular transports/64 relays and run the script's
-`--role sender --mailbox LOCAL_MAILBOX` and `--role receiver --mailbox LOCAL_MAILBOX`
-on the two test hosts with the same `--session` and `--trials`. Only the sender
-reads `--payload`; the receiver's argument is unused. Do not attach benchmark
-applications to a live training mailbox.
-
-### RAM validation — 2026-09-25
-
-DeltaAI allocation `3221988`, node `gh138`, existing ARM/JAX 0.5.3 runtime:
-
-- Final unit run: **17 passed**, including TCP/TLS, immutable descriptor handoff,
-  concurrent records/snapshot, partial-range retry, whole-buffer corruption
-  rejection, reconnect, released-buffer deduplication, mirrored executed actions,
-  resume cursor and SSH command construction. Source matches this RAM revision.
-- Independent-process TLS benchmark: two sidecars and two applications, 4 CPU
-  cores on one host, three transfers of the **same 2,017,578,406-byte snapshot**
-  used by the earlier WAN benchmark. Every SHA-256 matched. Transfer payloads
-  stayed in RAM; output contains only logs/results.
-
-| Trial | Receive/reassembly | Receiver verification | Send through verified ACK |
-| --- | ---: | ---: | ---: |
-| 1 | 0.762 s | 0.970 s | 1.734 s |
-| 2 | 0.707 s | 0.967 s | 1.674 s |
-| 3 | 0.721 s | 0.971 s | 1.693 s |
-
-Sender hashing/descriptor handoff cost another 0.959–0.963 s. The benchmark also
-independently hashes the application's received mapping (about 0.99 s), outside
-the transport verification above. These are **same-host TLS measurements**, not
-evidence that the earlier 76–87 MB/s WAN result has been reproduced.
-
-- Real-model integration: two model processes and two sidecars on one GH200,
-  recorded RGB only, 24 episodes / 384 transitions, batch 2, UTD 1, N=2/edit=2,
-  two updates, policy versions 0 and 352. Fixed-RNG actions matched the learner
-  after both RAM installations (`rtol=1e-4`, `atol=1e-5`). Checkpoint 384 saved
-  and restored with actor step 2 in the learner process. The driver exited 0.
-- Integration's post-update `POLICY_READY` span was 4.226 s on this single host
-  with plaintext loopback; its export/install hooks also perform action-parity
-  sampling. It is **not** an isolated serialization/install benchmark, a WAN
-  timing, a four-GPU scaling result, or a fresh-process resume test.
-- The first unit attempt exposed rejection of a sealed `MAP_SHARED` read mapping
-  on this kernel. Immutable readers now explicitly map `MAP_PRIVATE|PROT_READ`;
-  the pages remain shared and cannot be written/COWed by that mapping. No system
-  permissions, package installations or container changes were needed.
-- GPU integration preceded only the final W&B `commit` flag adjustment; final
-  unit tests cover that source. All validation used W&B disabled. Live W&B and
-  production Delta/DeltaAI -> ILIAD routing remain untested for this revision.
-
-Evidence: `/work/hdd/bgqe/kon/expo-ft/split-ram-validation-20260925/`, especially
-`validation-unit-final.log`, `validation-benchmark-32/results/`, and
-`validation-gpu-1/test/PASSED.json` plus the role logs. No WS/ILIAD workloads,
-camera devices or robot RPCs were used. Test processes/steps were stopped; the
-parent GPU allocations were retained. Policy identity completeness remains a
-separate review item. Subsequent abort and link-recovery changes are described below.
-
-### Abort while waiting for WS — 2026-09-25
-
-The split collector now checks the local sidecar for a received peer abort every
-100 ms while waiting for WS/RPCs, before starting a round, and after policy
-sampling. A failed check closes all environment connections and discards the
-incomplete round. The check is a local Unix-socket RPC (5-second response timeout),
-not another WAN round trip. Listener startup and close are synchronized so a
-cancelled client cannot reopen its listener. The legacy local collector does not
-enable these checks.
-
-This observes an abort **after it reaches the local sidecar**. It cannot recall
-an RPC already executing on WS, and it is not a heartbeat that detects a killed
-learner with no delivered abort. If sampling blocks, the check runs before its
-result is handed to the robot worker.
-
-DeltaAI `3221988.22` on `gh138`: **23 tests passed**, including real loopback
-WebSocket waits at accept/create/reset/step, abort before a round and during
-sampling, and idle-channel peer-abort detection over TCP and TLS. No real robot
-or camera was used. Evidence:
-`/work/hdd/bgqe/kon/expo-ft/split-ram-validation-20260925/validation-abort-1.log`.
-
-### Independent link recovery — 2026-09-25
-
-DeltaAI `3221988.24` on `gh138`: **34 tests passed**. TCP and TLS fault cases
-include three permanently unavailable routes, partial-range disconnect, lost
-commit ACK after application release, records progressing beside a stalled RPC,
-total-outage recovery, and a repaired worker rejoining. Mocked SSH children verify
-that initial/disconnection failures restart only that child at identical forward
-and reverse ports; a healthy child is untouched. No real SSH fault was injected
-by these unit tests.
-
-The same 2,017,578,406-byte fixture was then transferred three times over 32 TLS
-connections on `gh124`, using four CPU cores in allocation `3224015` and the
-existing ARM image. Receive/reassembly took **0.780 / 0.753 / 0.743 s**, with
-SHA-256 verification **0.979 / 0.983 / 0.985 s**; all hashes matched the earlier
-fixture. The previous same-host run on `gh138` took 0.762 / 0.707 / 0.721 s for
-receive/reassembly. These separate-node samples show similar local overhead,
-not a controlled WAN-throughput comparison.
-
-Evidence under `/work/hdd/bgqe/kon/expo-ft/split-ram-validation-20260925/`:
-`validation-failover-1.log` and `validation-failover-benchmark-32-cpu/results/`.
-The original one-GPU allocation was cancelled externally after the unit run;
-no replacement allocation was requested. Test steps/children exited, and the
-four-GPU parent allocation was retained. No model code changed for link recovery.
-
-### Cross-cluster recorded integration — 2026-09-25/26
-
-ILIAD H200 inference (17610534, `iliad-hgx-1`) and four-GH200 DeltaAI learning
-(3224015, `gh124`) completed 24 recorded episodes / 1,186 transitions with
-batch 64, UTD 20, FSDP1 and three updates per round. Six actor / 120 critic
-updates, exact received-record hashes, version replacement (0 → 1026), subsequent
-inference, and checkpoint save/restore passed. Originals were read-only and all
-used source files were rehashed unchanged. This is WebSocket mock replay, not a
-physical-robot or policy-success test.
-
-The successful fault run killed three actual SSH children during a 2.018 GB
-snapshot. Only those children restarted; the remaining 29 kept their PIDs.
-Snapshot and later reverse transition traffic recovered. This exposed/fixed
-two edge cases: port probes must permit TIME_WAIT reuse, and failed TLS send
-tracebacks must release sliced memoryviews before a healthy worker can retry
-and free the same RAM buffer. The latter regression fails on the old code;
-**37 tests pass** on the fixed code.
-
-The tested route terminates 32 SSH sessions on ILIAD compute through a scdt
-ProxyJump, making reverse listeners compute-local. No agent is forwarded to
-compute, and no firewall/sshd policy is changed. Treat forward and reverse
-reachability separately when deploying at another site.
-
-Steady update round: 32.887 s for three calls. Fault-injected snapshot receive:
-28.876 s, verification 1.584 s, actual GPU installation 2.332 s. The observed
-update-end → ready span (45.746 s) also includes test-only parameter re-export
-and inference comparisons. These numbers do not establish a speedup over an
-ILIAD-only deployment.
-
-Installed parameter bytes and transformed inputs match exactly across hosts;
-strict seeded **action** parity does not. Final diagnostic runs chose the same
-candidates with maximum raw action difference about 0.004, while one earlier
-comparison reached 0.214 without candidate diagnostics. That larger discrepancy
-is not conclusively explained. Do not interpret transport correctness as
-cross-platform numerical identity.
-
-Full evidence, attempt history, persistence-wrapper repair and limitations:
-`/scr/kevinon/workspace/expo-ft-split-validation/20260925-wan/REPORT.md`.
-Remote results are in `split-validation/20260925-wan/` beneath the user's
-ILIAD output and DeltaAI work directories. Test services/credentials were
-cleaned up; parent allocations retained. No commit or push.
-
-### Production WAN chunk scheduling validation (2026-09-26)
-
-Baseline split implementation: `54bce2d`. This change replaces equal per-link
-stripes with dynamically scheduled 4 MiB chunks and defaults to 64 links. On the
-same DeltaAI → scdt → ILIAD route, both SSH layers used AES-128-GCM through the
-task-specific config above; authenticated end-to-end TLS and full SHA-256 checks
-remained enabled. Model, snapshot contents and RAM descriptor handoff are unchanged.
-
-- **39 CPU tests passed**, including more chunks than links, slow-worker load
-  balancing, partial-chunk retry, lost acknowledgments, TLS failures and relay
-  restart isolation.
-- Actual production sidecars transferred the existing 2,017,578,406-byte snapshot
-  five times: receiver times **6.77–8.25 s**, median **7.46 s / 271 MB/s**.
-  Sender-observed transfer through receiver verification: **8.81–9.59 s**.
-- A separate two-transfer run killed three real SSH children during its second
-  transfer: **7.40 s** receive, **8.74 s** through verification. Only those three
-  children restarted; the other 61 retained their PIDs. All seven snapshots
-  matched the original SHA-256; no receiver payload file was written.
-- This validation used CPU-only 2-core/6-GiB steps on each compute node. It did
-  **not rerun GPU updates or policy installation**: the ILIAD GPU was occupied
-  by an existing training step. The full-model follow-up is recorded below.
-
-The timings exclude sender hash/handoff, GPU export/install, SSH startup and the
-benchmark's additional application-level digest. The diagnostic script initially
-used a Python 3.7 subprocess option on the login node's Python 3.6; after fixing
-that helper, fault injection was rerun separately. No production fault was hidden.
-Evidence and exact source archive hash:
-`/scr/kevinon/workspace/expo-ft-split-validation/20260926-production-net/REPORT.md`.
-
-### Full GPU follow-up after the training allocation became idle (2026-09-26)
-
-The same optimized executable source passed recorded-data end-to-end validation
-on ILIAD H200 ×1 and DeltaAI GH200 ×4. Both roles exited successfully: 24 episodes,
-1,186 transitions verified against original record hashes, six actor updates and
-120 critic updates (batch 64 / UTD 20), checkpoint 1186 saved and restored in-process.
-Updated version 1026 was installed with exact GPU parameter/input equality; the
-last 160 transitions were collected using that version. Inputs stayed read-only.
-
-Measured first/steady three-update blocks: **58.11 / 33.17 s**. For the updated
-2.018 GB policy: production export **1.23 s**, sender hash/handoff **0.99 s**,
-receiver transfer **6.66 s**, receiver SHA verification **2.16 s**, and actual
-GPU installation **4.51 s**. The observed update-end → inference-ready span was
-**35.88 s**, including test-only re-export, hashes and action diagnostics. It is
-not a 35.88-second production network or installation measurement.
-
-The strict cross-platform action comparison still differs (maximum selected
-action difference 0.003626, same candidate selected), as in the baseline. This
-does not invalidate exact parameter transfer, but is not numerical action parity
-or a physical-robot success result. This follow-up did not deliberately drop SSH
-links; the separate production fault test above covers that case. Idle TLS
-connections reconnected automatically during the first update interval.
-
-Final output copy to shared storage completed successfully; 1,307 output files
-and their sizes matched node-local results (17,469,107,377 bytes). No independent
-process restored the shared copy. Test steps, listeners and credentials were
-cleaned; the held GPU allocations remain available. Detailed results are under
-`gpu-net-2/` in the evidence paths above.
-
-### Dummy-camera omission integration (2026-09-26)
-
-EXPO merge `4d70165` combines the optimized WAN transport with `042b312`; its
-companion OpenPI revision is `19c1b33`. Experimental critic candidate grouping
-is not included. The same H200 ×1 / GH200 ×4 recorded-data test passed twice:
-24 episodes, 1,186 verified transitions, six actor / 120 critic updates, exact
-installed parameters and inputs, and in-process checkpoint save/restore.
-
-Steady three-update time fell from **33.17 s to 28.02 / 28.06 s** (about 15.5%,
-including replay preparation). Updated 2.018 GB policy receive took **6.24 / 6.73 s**.
-GPU installation took **34.08 / 4.28 s**: the first-run delay was not reproduced,
-but its cause remains unidentified. The new graph compiled on the first run.
-Cross-host actions still differ slightly (maximum 0.00345, same candidate selected);
-neither numerical parity nor physical task success is established.
-
-Both outputs persisted to shared storage, test services/credentials were removed,
-and parent GPU allocations were retained. Exact timing boundaries and evidence:
-`/scr/kevinon/workspace/expo-ft-split-validation/20260926-omit-camera/REPORT.md`.
+Latest fork-based verification (2026-09-27): H200 x1 inference / GH200 x4 learner,
+10Hz recorded playback, batch64 / UTD20 / three updates. Five steady cycles had
+median47.68s total and9.52s update-end through installed ACK. Snapshot receive
+was7.68s, GPU installation0.21s. Initial/first updated GPU parameters matched
+exactly;34 batch-PKL files and final checkpoint restore passed. This does not
+establish cross-platform action identity, real-robot timing or task success.
+The detailed report lives at
+`/scr/kevinon/workspace/expo-ft-validation/20260927-fork-10hz-5/REPORT.md`.
 
 ### Local multi-robot execution
 

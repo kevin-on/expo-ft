@@ -14,6 +14,16 @@ To determine which is best for your task, use the following criteria:
 - If your forward pass does not fit inside a control step and your task needs the policy to be reactive to changes in the environment, use [Real-Time EXPO-FT](#running-real-time-expo-ft).
 
 
+## Current multi-robot deployment
+
+For this fork, start with [the DeltaAI/ILIAD operating guide](scripts/split/README.md).
+It covers source/dependency versions, staging, persistent relay reuse, both GPU
+roles, authorized robot startup, mock verification and cleanup. The current
+workstation checkout is `/scr/kevinon/workspace/expo-ft-fork` on `multi-robot`.
+[Robot configuration](docs/multi_robot.md), [split architecture](docs/split_training.md)
+and [test inventory](tests/README.md) provide the implementation details.
+The paper's generic EXPO/RTC examples below are not the current cluster profile.
+
 ## Setup
 
 The repo has **two independent Python environments**:
@@ -32,11 +42,11 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 EXPO-FT and Real-Time EXPO-FT depend on two GitHub forks - OpenPI (used by the server) and DROID (used by the client). Clone **both before running `uv sync`**. uv installs them as editable local checkouts (see the `[tool.uv.sources]` blocks in `pyproject.toml` and `client/pyproject.toml`), so `uv sync` fails if they aren't present yet. OpenPI lives under `expo_ft/agents/vla/openpi` (used by both envs); DROID lives under `client/droid` (only the client venv needs it).
 
 
-**EXPO-FT**: [modified OpenPI](https://github.com/pd-perry/openpi/tree/expo_ft) and our pinned [DROID fork](https://github.com/kevin-on/droid), including the NUC setup and multi-robot integration.
+**EXPO-FT (this multi-robot fork)**: [companion OpenPI](https://github.com/kevin-on/openpi/tree/multi-robot) and our pinned [DROID fork](https://github.com/kevin-on/droid), including the NUC setup and multi-robot integration.
 
 ```bash
 # From the repo root.
-git clone -b expo_ft https://github.com/pd-perry/openpi.git expo_ft/agents/vla/openpi
+git clone -b multi-robot https://github.com/kevin-on/openpi.git expo_ft/agents/vla/openpi
 python scripts/multi_robot/setup_droid.py
 ```
 
@@ -74,7 +84,7 @@ Install:
 ```bash
 # From the repo root.
 # 1. Install client dependencies into ./client/.venv.
-cd client && uv sync && cd ..
+uv sync --project client --python 3.11 --locked --inexact
 
 # 2. (Optional) Install pyzed if you use a ZED camera. Must be a separate step
 #    because the pyzed wheel's numpy>=2.0 metadata over-constrains a binary
@@ -136,7 +146,7 @@ and independent snapshot transport, see [Split training](docs/split_training.md)
 
 ### OpenPI Setup
 
-We use a [modified fork of OpenPI](https://github.com/pd-perry/openpi/tree/real-time-expo-ft) (`real-time-expo-ft` branch) with support for frozen encoder training (for efficient action sampling) and Cartesian action control for DROID, plus the prefix-inpainted sampling and per-token adaRMS conditioning Real-Time EXPO-FT's `--delay` relies on. It builds on the [EXPO-FT fork](https://github.com/pd-perry/openpi/tree/expo_ft). Cloned into `./expo_ft/agents/vla/openpi` and installed editable during the [server setup](#server-learner) step (see [Clone the forks](#clone-the-forks)). The same checkout provides the SFT pretraining scripts wrapped below.
+This multi-robot deployment uses [kevin-on/openpi, branch multi-robot](https://github.com/kevin-on/openpi/tree/multi-robot), with companion revision recorded in [the operating guide](scripts/split/README.md). It supports EXPO Cartesian actions, frozen-encoder sampling and omission of the masked dummy camera. The same checkout provides the SFT scripts wrapped below. The separate upstream Real-Time EXPO-FT examples require their RTC-specific OpenPI branch; do not switch this deployment to that branch when following those examples. See [Clone the forks](#clone-the-forks).
 
 ### DROID Setup
 
@@ -372,7 +382,7 @@ export EXPO_CLIENT_VIDEO_DIR=/scr/kevinon/workspace/expo-ft-fork/data/videos/sft
 bash scripts/pick/eval_sft_policy.sh 0
 
 # Workstation, when ready to move the selected robot:
-export EXPO_EVAL_HOST=<reachable-compute-host-or-tunnel-endpoint>
+export EXPO_EVAL_HOST="<reachable-compute-host-or-tunnel-endpoint>"
 bash scripts/pick/run_sft_eval_client.sh 0
 ```
 

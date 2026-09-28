@@ -1,4 +1,9 @@
-# Delta H200 learner / inference runtime
+# Delta H200 base-model validation tools
+
+This legacy standalone validator keeps OpenPI from its image. It must be
+matched to the selected EXPO configuration; it is not validated with arbitrary
+new camera-omission settings or an old image. Prefer the current operating guide
+for deployment.
 
 Run the checked-out EXPO learner source using the validated x86-64 Apptainer
 image. Libraries and pinned OpenPI stay inside the image; the launcher snapshots
@@ -10,7 +15,8 @@ DeltaAI GH200 is ARM and needs a separate image.
 save, and an independent-process restore without connecting to a robot. It uses
 `pi05_base` with initialized LoRA and normalization fixtures computed from the
 recording. This verifies execution, memory and numerical checks, not policy
-quality. See [measured H200 results](VALIDATION.md).
+quality. For current SFT-initialized split execution use
+[the operating guide](../../../scripts/split/README.md).
 
 ## Persistent inputs and results
 

@@ -1,142 +1,383 @@
-# DeltaAI learner + ILIAD inference launch
+# DeltaAI learner / ILIAD inference: operating guide
 
-These scripts package the previously documented manual commands. They use the
-prepared EXPO/OpenPI source and architecture-specific containers, **without**
-changing model/training/transport code or starting a robot client automatically.
-No service starts by copying these files.
+Start here for this deployment. The workstation checkout is
+`/scr/kevinon/workspace/expo-ft-fork`, branch `multi-robot`. OpenPI is a separate,
+ignored checkout at `expo_ft/agents/vla/openpi`, also branch `multi-robot` from
+`kevin-on/openpi`; EXPO merges/pulls do not update it automatically.
+The `expo-ft-split` worktree is not an input to the prepared learner/inference.
 
-## Profile and defaults
+This guide covers an existing deployment, a fresh allocation, real robot clients,
+and robot-free verification. [Architecture](../../docs/split_training.md) explains
+ordering and recovery. [Robot configuration](../../docs/multi_robot.md) explains
+mirror, replay and hardware routing. [Test inventory](../../tests/README.md)
+separates regressions from GPU and hardware checks.
 
-Edit `deltaai_iliad.env` before preparation (or pass a trusted alternative profile
-as the final argument). It records the **2026-09-26 allocation's** job/node IDs,
-IP addresses, node-local images/models/source and shared dataset/output paths.
-Recheck allocation/step availability before launching; a replacement allocation
-needs new paths/IPs and restaging. These scripts do not allocate GPUs or stage
-large artifacts. If `scdt` is unavailable, fix connectivity before proceeding;
-there is no fallback SSH/authentication route.
+## 1. Establish the current state
 
-Defaults match the preceding manual recipe: mixed20 SFT step4999 base and its
-normalization stats, canonical mixed20 HDF5 demos, 2 robots, batch 64, UTD 20,
-3 updates/round, 10 warmup episodes per robot, 4 learner GPUs/FSDP1, 1 inference GPU, max 20000 total transitions,
-checkpoint+replay every 2000 transitions, W&B `mtexpo` / group `split-mixed20-r2`.
-The task remains `pick.py` (80-step episode limit). This is a **fresh online run**,
-not a resume of earlier online optimizer/replay state.
-
-Use the same RUN everywhere for output paths and the W&B name. For a coordinated
-restart, set the same fresh `SPLIT_SESSION` in both deployed profiles (otherwise it
-defaults to RUN). Stop both old model/transport roles first; relay/agent can stay up.
-Each launch uses a fresh temporary IPC directory and holds a per-role lock.
-A failed startup containing only `wandb_id.txt` is archived before restarting;
-actual checkpoints or replay records are preserved and require explicit resume
-configuration or a fresh RUN. Earlier role logs are retained with the Slurm step ID.
-Preparing an existing run or starting a duplicate role remains an error.
-Do not run with `bash -x`: launch-time environments contain credentials.
-
-## 1. Workstation: prepare small launch files
+On WS (lightweight commands only):
 
 ```bash
-cd /scr/kevinon/workspace/expo-ft-split
-bash scripts/split/workstation.sh prepare split-mixed20-r2-20260926-01
+source /scr/kevinon/env.sh
+cd /scr/kevinon/workspace/expo-ft-fork
+git status --short --branch
+git rev-parse HEAD
+git -C expo_ft/agents/vla/openpi status --short --branch
+git -C expo_ft/agents/vla/openpi rev-parse HEAD
+tmux list-panes -a -F '#S:#I.#P #{pane_current_command} #{pane_current_path}'
+ssh -F /scr/kevinon/.ssh/config -o BatchMode=yes deltaai 'hostname; squeue -u kon'
 ```
 
-Creates private token/TLS files (three-day certificate), the two transport JSONs,
-relay SSH configuration and a copy of these launch scripts/profile. Copies only
-these small files to each cluster's fresh shared run directory. It does not copy
-SSH private keys, checkpoints or datasets, and starts no remote process.
-The verified public known-host files are reused; unknown host keys are rejected.
-A failure can leave partially prepared directories; they are not silently replaced.
-
-Then, in a dedicated WS terminal:
-
-```bash
-bash scripts/split/workstation.sh agent split-mixed20-r2-20260926-01
-```
-
-This starts a dedicated agent containing only the Stanford key and adds one Unix
-socket forward to the existing DeltaAI SSH master. Keep it running. Ctrl-C removes
-only that forward and agent; it does not terminate the shared SSH master.
-A working existing `ssh deltaai` multiplex connection is required.
-
-## 2. DeltaAI login: relay
-
-```bash
-ssh -F /scr/kevinon/.ssh/config deltaai
-cd /work/hdd/bgqe/kon/expo-ft/runs/split-mixed20-r2-20260926-01/launch
-bash run_relay.sh split-mixed20-r2-20260926-01
-```
-
-Run on the profile's login node (`gh-login03`). It performs one read-only SSH
-hostname check, then starts the existing 64-connection relay supervisor. Keep this
-terminal/tmux pane open. Listen/forward ports are the existing 24101/24102,
-24200–24263 and 24300–24363 convention; only one run may use these ports at a time.
-Start the relay once and reuse it across sequential runs while the compute hosts
-and forwarding ports stay the same. Keep its WS agent running too; restarting
-model/transport roles does not require restarting either. Initial SSH handshakes
-and reconnects default to at most two concurrent attempts, spaced by at least
-0.5 seconds, with a shared cooldown after failures. Established tunnels are
-unaffected by this startup limit.
-
-## 3. DeltaAI login: learner (another pane)
-
-```bash
-cd /work/hdd/bgqe/kon/expo-ft/runs/split-mixed20-r2-20260926-01/launch
-bash run_role.sh learner split-mixed20-r2-20260926-01
-```
-
-## 4. ILIAD login: inference
-
-From WS, use the clean-shell route if normal login initialization is slow:
+For Stanford login, start from WS:
 
 ```bash
 ssh -t -F /scr/kevinon/.ssh/config scdt 'cd /tmp && exec bash --noprofile --norc'
-# On scdt (which does not have Slurm commands):
+# scdt is a gateway, not the Slurm controller:
 ssh -t sc-codex 'cd /tmp && exec bash --noprofile --norc'
 # On sc-codex:
-cd /iliad/u/kevinon/outputs/expo-ft/split-online/split-mixed20-r2-20260926-01/launch
-bash run_role.sh inference split-mixed20-r2-20260926-01
+squeue -u kevinon
 ```
 
-Both role commands are run on **login nodes**, outside an existing compute shell.
-They show current Slurm job/steps, start one exclusive resource step in the held
-allocation, and start a transport sidecar plus the model inside the validated
-container. No nested `srun`, `--overlap`, new allocation or parent-job cancellation.
-Use login-node tmux for persistence, then reconnect to the same login node.
-Node-local stage paths must still exist; missing inputs fail before model startup.
-The inference process waits for robot clients; it does not open cameras itself.
+Read `deltaai_iliad.env`. Job IDs, nodes, addresses and `/tmp` paths are live
+state, not permanent constants. Before using an allocation, inspect
+`scontrol show job JOB -o`, `squeue --steps -j JOB`, and its GPU processes.
+Do not start model/transport processes on an occupied port/GPU. No device checks
+or robot client startup are implied by a request to prepare servers.
 
-Logs: shared run directory `learner.log` / `inference.log`, `transport-ROLE.log`,
-and DeltaAI `relay.log`. Learner checkpoints: `DELTA_RUN_ROOT/RUN/checkpoints`.
-Inference's video directory points to the **workstation** path in the profile.
+Last verified state, **2026-09-27**, not a reservation guarantee:
 
-## 5. Robot clients: existing launcher, only when ready for motion
+| Item | Prepared value |
+| --- | --- |
+| EXPO application / companion OpenPI | `db268da` / `19c1b33` |
+| DeltaAI learner | job `3237441`, node `gh090`, GH200 x4 |
+| ILIAD inference | job `17637291`, node `iliad-hgx-1`, H200 x1 |
+| DeltaAI relay host | `gh-login03`, `172.28.80.9` |
+| Running WS agent / relay terminals | tmux `expo-wan-relay`, windows `agent`, `relay` |
+| Persistent relay deployment | `/work/hdd/bgqe/kon/expo-ft/split-validation/20260927-relay-reuse` |
+| WS relay auxiliary files | `/scr/kevinon/workspace/expo-ft-split-validation/20260926-production-net/private` |
+| Last mock verification | `/scr/kevinon/workspace/expo-ft-validation/20260927-fork-10hz-5/REPORT.md` |
 
-After both model processes initialize and inference is waiting for clients:
+The auxiliary directory named `expo-ft-split-validation` is **not** the split
+checkout. Keep its pinned host keys and the profile used by the live agent.
+The agent was originally launched from the old worktree, but established
+transfers use remote relay code and its existing socket under
+`/scr/kevinon/tmp/expo-split-links/`; do not restart it just to change a cwd.
+Future launches below use fork.
+
+## 2. Choose inputs and a run name
+
+The checked-in profile records:
+
+- mixed20 SFT step 4999 parameters and **their matching** normalization asset ID;
+- canonical mixed20 HDF5 demonstrations, `offline_ratio=0` (seed replay);
+- 2 robots, batch 64, UTD 20, 3 update calls/round, FSDP 1;
+- 10 warmup episodes **per robot**, max 20000 aggregate transitions,
+  model/replay checkpointing every 2000 transitions;
+- W&B project `mtexpo`, group `split-mixed20-r2`;
+- workstation videos under `expo-ft-fork/data/videos`.
+
+These are the verified baseline, not an automatic selection of the newer SFT
+campaign. To change SFT initialization, stage that checkpoint's `params/` and
+`assets/` on both hosts; set the matching `ASSET_ID` and offline `DEMO`. Never
+substitute normalization statistics from a different dataset.
+
+Pick one descriptive, fresh `RUN` and use it on every machine, e.g.
+`mixed20-r2-20260928-01`. It names output directories and the W&B run; it is not
+a dataset or branch name. `SPLIT_SESSION` identifies one coordinated live session.
+Both roles need the same session and fresh IPC directories on restart.
+
+On WS, either edit `scripts/split/deltaai_iliad.env` or copy it to a trusted local
+profile and pass its **absolute path** as the final script argument. Profiles
+are sourced shell code. Never put tokens/private keys in them or run `bash -x`.
+
+## 3. Inputs: reuse prepared staging or stage a fresh allocation
+
+If the verified allocation is still alive, check the profile's source, image,
+checkpoint and model-cache paths and reuse them. No fresh download/build is needed.
+All GPU execution belongs inside Slurm; perform large copies on compute nodes.
+
+Persistent inputs (check existence before use):
+
+| Artifact | Location |
+| --- | --- |
+| GH200 ARM image | `/projects/bgqe/kon/expo-ft/access-runtime/expo-sft-learner-jax053-aarch64-20260923.sif` |
+| H200 x86 image on ILIAD | `/iliad/u/kevinon/artifacts/expo-ft/access-runtime/expo-ft-sft-jax053-20260922.sif` |
+| Tokenizer on DeltaAI | `/projects/bgqe/kon/expo-ft/baseline-20260921/openpi-cache/big_vision/paligemma_tokenizer.model` |
+| Tokenizer on ILIAD | `/iliad/u/kevinon/artifacts/expo-ft/openpi-cache/big_vision/paligemma_tokenizer.model` |
+| DeltaAI baseline checkpoint | `/work/hdd/bgqe/kon/expo-ft/sft-runs/balance0923-seed3-5k-20260923/runs/mixed-020/checkpoints/expo_pi05_droid_lora_finetune_sft_cartesian_state/mixed-020-seed3-b64-s42-5k-deltaai-20260923/4999` |
+| ILIAD baseline checkpoint | `/iliad/u/kevinon/artifacts/expo-ft/sft-eval/balance0923-seed3-5k-20260923/mixed-020/4999` |
+| HDF5 demos on DeltaAI | `DEMO` in the profile (dataset root containing numbered episode directories) |
+| Prepared EXPO/OpenPI on DeltaAI | `/work/hdd/bgqe/kon/expo-ft/validation/20260927-fork-10hz-5/production/source` |
+| Same prepared source on ILIAD | `/iliad/u/kevinon/outputs/expo-ft/validation/20260927-fork-10hz-5/production/source` |
+
+For a **new allocation**:
+
+1. Read Slurm's new node/job/resources. Update job, node, compute IP, stage and
+   image/source paths in the profile. `scdt` cannot run `squeue`; use sc-codex.
+2. Use `srun --jobid=JOB --exact -N1 -n1 -c... --mem=... --gpus=... --pty bash`
+   from the relevant login node, within the held allocation's resources. Do not
+   nest srun inside that shell. Inspect jobs before using `--overlap`; it does
+   not mean a GPU is free. GPU counts: DeltaAI 4, ILIAD 1 for this deployment.
+3. In each compute shell stage the architecture-correct inputs. Set `STAGE`,
+   `SHARED_SOURCE`, `IMAGE_SOURCE`, `CHECKPOINT_SOURCE`, `TOKENIZER_SOURCE`,
+   `BUNDLE`, and `ASSET_ID` from the selected profile/table, then:
 
 ```bash
-cd /scr/kevinon/workspace/expo-ft-split
+# COMPUTE ONLY. Choose a fresh STAGE; this is not the repository or output root.
+df -h /tmp
+# Allow at least 40 GiB for image, weights, cache and test inputs.
+mkdir -p "$STAGE/model-cache/big_vision" "$STAGE/code-$BUNDLE/repo"
+cp "$IMAGE_SOURCE" "$STAGE/runtime.sif"
+rsync -a "$CHECKPOINT_SOURCE/" "$STAGE/checkpoint/"
+cp "$TOKENIZER_SOURCE" "$STAGE/model-cache/big_vision/paligemma_tokenizer.model"
+rsync -a "$SHARED_SOURCE/" "$STAGE/code-$BUNDLE/repo/"
+test -d "$STAGE/checkpoint/params"
+test -f "$STAGE/checkpoint/assets/$ASSET_ID/norm_stats.json"
+test -f "$STAGE/code-$BUNDLE/repo/expo_ft/agents/vla/openpi/src/openpi/models/pi0.py"
+```
+
+4. Set `DELTA_IMAGE`/`ILIAD_IMAGE` to the staged SIF and each `*_SOURCE` to
+   `$STAGE/code-$BUNDLE/repo`. Preserve project/shared outputs across allocations;
+   node-local source, checkpoints, SIF and compilation cache are disposable.
+5. If a compute host changed, the old SSH route targets the old host. After
+   stopping its users, retire **that route** and prepare/start a new relay/agent.
+   If hosts/ports are unchanged, keep the existing route (next section).
+
+The image provides libraries; source is bind-mounted over `/opt/expo-ft`.
+Do not assume code baked into an old image is current. Do not run the historical
+`access-setup/runtime.py` without checking its pinned EXPO/OpenPI versions.
+
+### Deploying a new code version
+
+For new code, publish/copy an explicit EXPO **and OpenPI** snapshot to both
+shared hosts, then stage it. This example exports committed source; it excludes
+uncommitted edits. Do not discard changes to make it pass.
+
+```bash
+# WS: small source archives only; no model/data packaging.
+cd /scr/kevinon/workspace/expo-ft-fork
+git status --short
+git -C expo_ft/agents/vla/openpi status --short
+# After choosing the committed revisions to deploy:
+BUNDLE="$(git rev-parse --short=12 HEAD)-$(git -C expo_ft/agents/vla/openpi rev-parse --short=12 HEAD)"
+SOURCE_PACKAGE="/scr/kevinon/tmp/expo-source-$BUNDLE"
+mkdir "$SOURCE_PACKAGE"
+git archive HEAD -o "$SOURCE_PACKAGE/expo.tar"
+git -C expo_ft/agents/vla/openpi archive HEAD -o "$SOURCE_PACKAGE/openpi.tar"
+(cd "$SOURCE_PACKAGE" && sha256sum expo.tar openpi.tar > SHA256SUMS)
+```
+
+Copy those small archives to a fresh shared directory on each cluster (SSH/scp
+using the same authenticated routes as `workstation.sh`). On compute, verify
+both checksums against the WS values, extract EXPO into `repo/` and OpenPI into
+`repo/expo_ft/agents/vla/openpi/`, then use that path as `SHARED_SOURCE` above.
+Record full commit IDs and archive hashes. Never copy client/.venv across
+architectures or source models from the split worktree implicitly.
+
+## 4. Prepare the new run; reuse a live relay
+
+On WS:
+
+```bash
+cd /scr/kevinon/workspace/expo-ft-fork
+RUN=mixed20-r2-20260928-01  # choose a new name
+bash scripts/split/workstation.sh prepare "$RUN"
+# For a custom profile: append /absolute/path/to/profile.env
+```
+
+This creates private TLS/token files and copies small launch/config files to
+both shared `RUN/launch` and `RUN/link` directories. No services or devices start.
+It refuses existing output directories; inspect partial preparation after failure.
+Transport TLS/token files must match between both endpoints. Certificates created
+by this script expire after three days; inspect with
+`openssl x509 -in PATH/link/cert.pem -noout -enddate`.
+
+**Already-running relay on the same hosts/ports:** skip agent and relay launch.
+Its old run-name merely identifies the SSH route/authentication socket. The new
+application RUN uses its own TLS/token and mailbox through the same forwarded
+ports; do not replace files under the live relay directory.
+
+For the recorded current route, keep tmux `expo-wan-relay` alive. On gh-login03,
+`ps -eo pid,ppid,args` can locate the relay supervisor (last observed 4068312);
+verify its children/endpoints instead of trusting that old PID. Endpoint metadata
+is in its `link/relay-endpoints.json`. The supervisor restarts failed SSH links
+independently; healthy links continue transferring.
+
+**No suitable relay yet:** after preparation, start the following once.
+
+WS dedicated terminal:
+
+```bash
+bash scripts/split/workstation.sh agent "$RUN"
+```
+
+DeltaAI **gh-login03**, dedicated terminal (first log in with
+`ssh -F /scr/kevinon/.ssh/config deltaai` and check hostname):
+
+```bash
+RUN=mixed20-r2-20260928-01
+cd "/work/hdd/bgqe/kon/expo-ft/runs/$RUN/launch"
+bash run_relay.sh "$RUN"
+```
+
+A working DeltaAI multiplex SSH master is needed for the dedicated Stanford-key
+agent's socket forward. Do not copy private keys to clusters. Connections use
+64 SSH tunnels, 4MiB chunks, listener ports 24101/24102 and forwarded ranges 24200–24263 / 24300–24363.
+Only one model/transport session can own those ports at a time. Do not start a
+second relay merely because a new model run has a different name.
+
+## 5. Start learner and inference; then the robot clients
+
+DeltaAI **login node**, separate terminal:
+
+```bash
+RUN=mixed20-r2-20260928-01
+cd "/work/hdd/bgqe/kon/expo-ft/runs/$RUN/launch"
+bash run_role.sh learner "$RUN"
+```
+
+Stanford **sc-codex login node**, after the scdt route in section 1:
+
+```bash
+RUN=mixed20-r2-20260928-01
+cd "/iliad/u/kevinon/outputs/expo-ft/split-online/$RUN/launch"
+bash run_role.sh inference "$RUN"
+```
+
+Use the roots printed by prepare if your profile overrides them. These scripts
+launch Slurm steps themselves; invoke them outside an existing compute shell.
+They bind staged source, SFT params+assets, caches and the new run's link files;
+then start a transport sidecar and model. Inference waits for clients, without
+opening cameras. `POLICY_READY version=0` confirms initial policy installation.
+Learner W&B uses the protected key file named in the profile; never print it.
+
+**Only when the user authorizes real robot execution**, on WS in two terminals:
+
+```bash
+cd /scr/kevinon/workspace/expo-ft-fork
 EXPO_LEARNER_HOST=iliad-hgx-1.stanford.edu EXPO_LEARNER_BASE_PORT=8102 \
   bash scripts/multi_robot/run_workstation_rollout.sh 0
-# Another workstation pane, when robot1 is ready:
+# Other terminal, same environment variables:
 EXPO_LEARNER_HOST=iliad-hgx-1.stanford.edu EXPO_LEARNER_BASE_PORT=8102 \
   bash scripts/multi_robot/run_workstation_rollout.sh 1
 ```
 
-These commands access actual devices and permit reset/motion. Check physical
-readiness and current SpaceMouse/camera mappings before executing them.
-The legacy environment name `EXPO_LEARNER_HOST` points to **inference** here.
+Replace the host with the verified inference node. Despite its legacy name,
+`EXPO_LEARNER_HOST` points to inference. The launcher enumerates cameras/HID and
+can initialize controllers/reset/move robots when requested. It is not a harmless
+connectivity probe. Never run it for mock verification.
 
-## Stop
+## 6. Robot-free 10Hz verification
 
-Stop robot clients first, then Ctrl-C the role commands; their exit handlers stop
-only their own model/transport children. Keep relay and the WS agent running for
-the next run on the same hosts/ports. When finished using that route, Ctrl-C relay,
-then Ctrl-C the WS agent terminal. Parent held allocations remain allocated and
-charged. For an unattended step, inspect `squeue --steps -j JOB` and terminate
-only its exact `JOB.STEP`.
-Do not use `scancel JOB` unless returning the entire allocation is intended.
-Credentials remain in each run's private `link/` directory for explicit cleanup;
-no script recursively deletes outputs/checkpoints or cancels unrelated forwards.
+The maintained integration test is `tests/gpu/split_wan_smoke.py`. It uses real
+models, updates, transports and WebSocket RPC, but starts two loopback **mock**
+clients on ILIAD using recorded trajectories. No WS client or robot SDK is used.
+The standalone harness also contains expensive diagnostic parameter/action
+comparisons; use the recorded profiling snapshot below for comparable timing.
 
-For short validation, set `WARMUP_EPISODES=1` in the run profile. The first round
-is warmup; updates can begin after the second round (subject to batch size).
-This sets `--split_warmup_episodes`; the default remains 10.
+Latest reproducible profiling bundle, prepared from fork on 2026-09-27:
+
+- WS driver/evidence: `/scr/kevinon/workspace/expo-ft-validation/20260927-fork-10hz-5/`.
+- DeltaAI: `/work/hdd/bgqe/kon/expo-ft/validation/20260927-fork-10hz-5/`.
+- ILIAD: `/iliad/u/kevinon/outputs/expo-ft/validation/20260927-fork-10hz-5/`.
+- Each contains `runtime.py`, `current/source.tar`, `current/openpi.tar`, and
+  `current/source-manifest.json`; runtime verifies archive and per-file hashes.
+- Node-local fixture and checkpoint caches are under
+  `/tmp/expo-xxh3-batch-JOB/`; original recordings are never modified.
+
+On the **same verified allocations**, with no model/transport step using the
+ports, choose the same fresh ATTEMPT in both commands. Keep relay/agent alive.
+
+DeltaAI login:
+
+```bash
+ATTEMPT=repeat-10hz-01  # new each time
+srun --jobid=3237441 --exact -N1 -n1 -c48 --mem=440G --gpus=4 --time=01:00:00 \
+  python3 -u /work/hdd/bgqe/kon/expo-ft/validation/20260927-fork-10hz-5/runtime.py \
+  --phase run --attempt "$ATTEMPT" --rounds 17 --playback-hz 10
+```
+
+Stanford sc-codex login, concurrently:
+
+```bash
+ATTEMPT=repeat-10hz-01
+srun --jobid=17637291 --exact -N1 -n1 -c12 --mem=128G --gres=gpu:h200:1 --time=01:00:00 \
+  python3 -u /iliad/u/kevinon/outputs/expo-ft/validation/20260927-fork-10hz-5/runtime.py \
+  --phase run --attempt "$ATTEMPT" --rounds 17 --playback-hz 10
+```
+
+Both commands must exit 0. Under each bundle's `current/ATTEMPT/`, inspect
+`exit.json`, `output/node-result.json`, role logs and
+`output/learner/learner-passed.json` / `output/inference/inference-passed.json`.
+Require 34 batch replay files verified, 2033 transitions, checkpoint restore,
+matching installed versions, and the two `installed-exact-*.json` confirmations.
+Ten warmup rounds, first compilation/update and final drain are excluded;
+rounds 11–15 are the five measured cycles. Each has 80 steps (~8s at 10Hz).
+`profile-*.jsonl` contains `round_start`, `round_rollout_done`, save/install spans
+and update metrics; the local `analyze.py` documents the timing boundaries.
+For collection of a different ATTEMPT, change `five-10hz` in a copy of the small
+collect/probe scripts; never overwrite the previous evidence.
+
+This reruns the **frozen tested version**, not future checkout edits. To validate
+new code, `prepare.py` in the WS evidence directory packages fork and applies
+only timing/exact-parameter instrumentation. Run a copy under a fresh directory,
+inspect its source diff/manifest, and copy its new archives/runtime to fresh
+remote bundle directories. Update the driver endpoints/output roots and attempt;
+never overwrite a running or previous bundle.
+
+For **new allocations**, do not run this frozen runtime unchanged: its ARM image
+path and existing fixture staging assume the observed jobs. Adapt a copy's image
+path, input staging and relay-link mount, stage the unchanged fixture from the
+previous shared bundle listed below, and verify its manifest. The underlying maintained harness is allocation-independent:
+
+```bash
+# Inside the appropriately bound compute container, one role per host:
+python -u tests/gpu/split_wan_smoke.py --role node --node-role learner \
+  --fixture /fixture --output /output --params /checkpoint/params \
+  --assets /checkpoint/assets --mailbox /mailbox \
+  --transport-config /link/transport-learner.json \
+  --rounds 17 --playback-hz 10 --session NEW_SHARED_SESSION
+# On ILIAD: node-role inference, transport-inference.json, separate output/mailbox.
+```
+
+Persistent original fixture directories (both have `manifest.json`, `reference.pkl`
+and per-robot episode files):
+
+- DeltaAI: `/work/hdd/bgqe/kon/expo-ft/split-validation/20260927-xxh3-batch-e2e/fixture`.
+- ILIAD: `/iliad/u/kevinon/outputs/expo-ft/split-validation/20260927-xxh3-batch-e2e/fixture`.
+
+On each compute host, copy its fixture to the **new** wrapper bundle's `fixture/`
+with `rsync -a`; compare the manifest checksum on both hosts. The wrapper stages
+it locally and creates a separate expanded manifest, leaving original files intact.
+Do not manufacture `INPUTS_READY.json` to skip staging; it records verified inputs.
+
+The fixture manifest must contain 17 paired episodes; the latest wrapper expands
+its recorded 12-round fixture to 17 by repeating the final 80-step episode. Bind
+that expanded fixture read-only on both hosts. Original source records were from
+`/iliad/u/kevinon/outputs/expo-ft/online/online-mixed20-r2-b64-utd20-reset-overlap-20260925-203855/output/online-mixed20-r2-b64-utd20-reset-overlap-20260925-203855/`.
+Check available shared fixture directories before an allocation expires; do not
+assume node-local `/tmp` is persistent.
+
+## 7. Inspect, stop, restart
+
+- Per-run shared logs: `learner.log`, `inference.log`, `transport-ROLE.log`.
+  Checkpoints/replay: `DELTA_RUN_ROOT/RUN/checkpoints`.
+  Videos are written on WS to `WS_VIDEO_ROOT`, not to ILIAD's filesystem.
+- `split/update_seconds` includes replay batch preparation and GPU completion.
+  `through_inference_ready_seconds` spans update end through snapshot export,
+  hash/handoff, receive/verify, GPU installation and installed ACK. It excludes
+  rollout and does not assert that physical reset has finished.
+- Latest five-cycle median: 47.68s total, 8.07s rollout, 26.27s three updates,
+  9.52s update-end→ACK; receive 7.68s, GPU installation 0.21s. Mock execution is
+  not proof of physical reset timing or task success.
+- Stop robot clients first if running, then stop only the two role commands/test
+  steps. Their handlers stop their own model/mock/transport children. Keep the
+  relay and WS agent for sequential runs on the same hosts/ports.
+- To stop a specific Slurm step: `scancel --signal=TERM JOB.STEP` after checking
+  its identity. `scancel JOB` returns the entire held allocation; do that only
+  when requested. Verify remaining steps after tests.
+- A fresh run is not checkpoint resume. `run_role.sh` deliberately refuses a
+  trained checkpoint directory. Actual resume requires `train_pi_robo.py --resume
+  --checkpoint_buffer` with the matching run/data/robot ordering and fresh shared
+  split session; consult [checkpoint semantics](../../docs/split_training.md).
+- If scdt/SSH authentication fails, report it. Do not create alternative relay
+  hosts, change firewall rules or forward extra keys as an implicit workaround.
