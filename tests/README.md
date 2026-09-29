@@ -96,3 +96,12 @@ If the read-only compute image lacks pytest, install it into node-local scratch:
 `python -m pip install --target /cache/test-deps pytest`, then prepend
 `/cache/test-deps` to `PYTHONPATH` for test commands only. Do not rebuild the shared
 runtime or alter a running robot's environment for test dependencies.
+
+- `test_robot_eval.py`: two-robot Space gating, first-plan barrier, independent reset,
+  mirrored inputs/actions and shared-model/failure behavior; fake environments only.
+- `gpu/robot_eval.py`: one coordinator round with recorded observations and a real
+  SFT or online policy on one allocated GPU. No WS or hardware connections.
+
+Run `python tests/cpu/test_sft_eval.py` separately: its import-isolation assertion
+intentionally requires a process that has not imported JAX. Do not combine that
+assertion with RPC tests that import the training stack.

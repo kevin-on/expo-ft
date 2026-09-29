@@ -141,3 +141,40 @@ def test_actual_rollout_handler_with_fake_hardware(monkeypatch, human_steps):
         thread.join(timeout=2)
     assert instances[0].closed
     assert not run_client._env_storage
+
+
+@pytest.mark.parametrize('mismatch', [False, True])
+def test_coordinated_eval_handler_without_hardware(monkeypatch, mismatch):
+    from client import run_client
+    instances = []
+    class LocalEnv(FakeEnv):
+        def __init__(self, **kwargs):
+            super().__init__(2); self.kwargs=kwargs; self.fresh_frames=0; instances.append(self)
+        def reset(self, *, return_observation=True):
+            self.index=0
+            return self.get_observation() if return_observation else None
+        def get_observation(self):
+            self.fresh_frames+=1; return super().get_observation()
+    config=run_client.load_task_config('configs/task/pick.py');config.env=LocalEnv
+    monkeypatch.setattr(run_client,'load_task_config',lambda _:config)
+    monkeypatch.setattr(run_client,'_robot_config',{})
+    env=EnvClientWrapper(dict(env_usage='eval',coordinated_eval=True,async_video=True,
+        expected_task_settings={'control_hz':-1 if mismatch else config.control_hz}),
+        '127.0.0.1',0,recover=False,lazy=True)
+    env.client._ensure_server();port=env.client._server.socket.getsockname()[1]
+    async def dial():
+        async with async_connect(f'ws://127.0.0.1:{port}') as ws:
+            await run_client._handle_environment_request(ws)
+    thread=threading.Thread(target=lambda:asyncio.run(dial()),daemon=True);thread.start()
+    try:
+        if mismatch:
+            with pytest.raises(RuntimeError,match='Eval task mismatch'):env.reset_only()
+            assert not instances
+        else:
+            env.reset_only()
+            assert instances[0].kwargs['async_video'] and instances[0].fresh_frames==0
+            assert not run_client._eval_env_ids
+            env.start_episode();assert instances[0].fresh_frames==1
+    finally:
+        env.close();thread.join(timeout=2)
+    assert not thread.is_alive()

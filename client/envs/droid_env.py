@@ -88,14 +88,6 @@ class DroidEnv(RobotEnv):
         self._ep_count = 0
         self._video_writer = EpisodeVideoWriter(save_episode_video_to_disk) if async_video and video_dir else None
 
-    def close(self):
-        try:
-            super().close()
-        finally:
-            writer = getattr(self, "_video_writer", None)
-            if writer is not None:
-                writer.close()
-
     def reset(self, *, return_observation=True):
         self._before_reset()
         self._steps_since_reset = 0
@@ -273,6 +265,11 @@ class DroidEnv(RobotEnv):
             super().close()
         except Exception:
             pass
+        finally:
+            writer = getattr(self, "_video_writer", None)
+            if writer is not None:
+                self._video_writer = None
+                writer.close()
 
     def __del__(self):
         try:

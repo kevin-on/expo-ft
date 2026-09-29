@@ -42,3 +42,10 @@ def validate_camera_views(task_config, expected_views):
     for key, expected in expected_views.items():
         if task_config.get(key) != expected:
             raise ValueError(f"Mirror training requires {key}={expected!r}; got {task_config.get(key)!r}")
+
+
+def validate_eval_task(task_config, expected):
+    """Validate the coordinator/client control contract before opening hardware."""
+    for key, value in expected.items():
+        if task_config.get(key) != value:
+            raise ValueError(f"Eval task mismatch for {key}: expected {value!r}, got {task_config.get(key)!r}")

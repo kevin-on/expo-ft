@@ -112,3 +112,6 @@ Wrist-off real inference and the OpenPI tiny-model save/resume test also passed.
 Full validation evidence is under
 `/scr/kevinon/workspace/expo-ft-validation/20260929-model-config` and
 `/iliad/u/kevinon/outputs/expo-ft/validation/20260929-model-config`.
+
+The coordinated UI is `eval_sft_robots.py`; it uses these same model loaders and
+takes no model config. See [two-robot eval](two_robot_eval.md).

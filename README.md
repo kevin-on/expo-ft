@@ -367,14 +367,15 @@ bash scripts/pick/eval_policy.sh
 
 Parameters should match the corresponding `run_server.sh` or `run_server_async.sh` training settings.
 
-#### Evaluate the mixed two-robot SFT checkpoints
+#### Evaluate SFT / online checkpoints on one or two robots
 
 Model settings and normalization are loaded from the checkpoint. See
 [checkpoint configuration](docs/model_config.md) for metadata requirements,
 resume and old artifacts. SFT evaluation loads only the SFT policy and needs no
 training dataset or EXPO model overrides.
 
-Run one robot at a time, with the same robot ID on both hosts:
+Use `both`, `0`, or `1` on both launchers. The GPU terminal owns the Space start
+gate and progress dashboard. See [two-robot evaluation](docs/two_robot_eval.md).
 
 ```bash
 # Allocated GPU/container shell, in the prepared learner environment.

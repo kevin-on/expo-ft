@@ -135,6 +135,27 @@ class AsyncVideoTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             writer.submit([("raw", [])], "unused", 2)
 
+    def test_environment_close_drains_writer_even_on_camera_close_error(self):
+        tree = ast.parse((ROOT / "client/envs/droid_env.py").read_text())
+        klass = next(n for n in tree.body if getattr(n, "name", None) == "DroidEnv")
+        methods = [n for n in klass.body if getattr(n, "name", None) == "close"]
+        self.assertEqual(len(methods), 1, "A later close must not override writer cleanup")
+        klass.body = methods
+        klass.bases = [ast.Name(id="Base", ctx=ast.Load())]
+        ast.fix_missing_locations(klass)
+        class Base:
+            def close(self): pass
+        calls = []
+        class Camera:
+            def disable_cameras(self): raise RuntimeError("disconnected")
+        class Writer:
+            def close(self): calls.append("drained")
+        ns = {"Base": Base}
+        exec(compile(ast.Module(body=[klass], type_ignores=[]), "<close>", "exec"), ns)
+        env = ns["DroidEnv"]();env.camera_reader=Camera();env._video_writer=Writer()
+        env.close();env.close()
+        self.assertEqual(calls, ["drained"])
+
     def test_close_waits_for_active_save(self):
         started, release, closed = (threading.Event() for _ in range(3))
         def save(*args, **kwargs):

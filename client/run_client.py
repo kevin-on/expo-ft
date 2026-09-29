@@ -245,6 +245,9 @@ async def _handle_environment_request(websocket):
                     if request.get("expected_camera_views"):
                         from expo_ft.env.sft_eval import validate_camera_views
                         validate_camera_views(task_config, request["expected_camera_views"])
+                    if request.get("expected_task_settings"):
+                        from expo_ft.env.sft_eval import validate_eval_task
+                        validate_eval_task(task_config, request["expected_task_settings"])
                     _task_config = task_config
                     env_name = task_config.env_name
                     env_usage = request["env_usage"]
@@ -255,11 +258,12 @@ async def _handle_environment_request(websocket):
                     env_kwargs = dict(task_config)
                     env_kwargs["video_dir"] = request.get("video_dir") or ""
                     env_kwargs["env_usage"] = env_usage
-                    if env_usage == "train" and request.get("async_video", False):
+                    coordinated_eval = env_usage == "eval" and request.get("coordinated_eval", False)
+                    if (env_usage == "train" or coordinated_eval) and request.get("async_video", False):
                         env_kwargs["async_video"] = True
                     env = task_config.env(**env_kwargs)
                     _env_storage[env_id] = env
-                    if env_usage == "eval" and task_config.env_type == "droid":
+                    if env_usage == "eval" and task_config.env_type == "droid" and not coordinated_eval:
                         _eval_env_ids.add(env_id)
                     logger.info(f"Environment {env_id} created successfully")
                     
