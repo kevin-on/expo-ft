@@ -36,15 +36,20 @@ count = int(count)
 if not 1 <= count <= 64:
     raise SystemExit('CONNECTIONS must be 1..64')
 for role, listen, peers in (
-    ('learner', ['0.0.0.0', 24101], [[login, 24200 + i] for i in range(count)]),
-    ('inference', ['127.0.0.1', 24102], [['127.0.0.1', 24300 + i] for i in range(count)]),
+    ('learner', ['0.0.0.0', 24101], [[login, 24200 + i] for i in range(64)]),
+    ('inference', ['127.0.0.1', 24102], [['127.0.0.1', 24300 + i] for i in range(64)]),
 ):
     cfg = dict(mailbox='/mailbox', listen=listen, peers=peers,
-               parallel_connections=count, record_connections=4,
+               parallel_connections=64, record_connections=4,
                chunk_bytes=4 * 1024**2, token_file='/link/token',
                tls=dict(cert_file='/link/cert.pem', key_file='/link/key.pem', ca_file='/link/cert.pem'))
+    if role == 'learner':
+        cfg['relay_state_file'] = '/link/relay-state.json'
+        cfg['stats_file'] = '/output/' + Path(remote).parent.name + '/transfer-stats.json'
     (root / ('transport-' + role + '.json')).write_text(json.dumps(cfg, indent=2) + '\n')
-relay = dict(ssh_config=remote + '/ssh-config', ssh_host='iliad-bench', connections=count,
+relay = dict(ssh_config=remote + '/ssh-config', ssh_host='iliad-bench', connections=count, max_connections=64,
+             state_file=remote + '/relay-state.json',
+             stats_file=str(Path(remote).parent / 'transfer-stats.json'),
              listen_host=login, first_port=24200, destination=['127.0.0.1', 24102],
              reverse=dict(listen_host='127.0.0.1', first_port=24300, destination=[compute, 24101]),
              output=remote + '/relay-endpoints.json')

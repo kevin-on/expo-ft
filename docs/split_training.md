@@ -287,7 +287,8 @@ If direct compute-to-compute access is unavailable, run
 {
   "ssh_config": "/private/ssh/config",
   "ssh_host": "REMOTE_LOGIN",
-  "connections": 64,
+  "connections": 32,
+  "max_connections": 64,
   "listen_host": "127.0.0.1",
   "first_port": 20000,
   "destination": ["REMOTE_COMPUTE", 19002],
@@ -301,7 +302,7 @@ If direct compute-to-compute access is unavailable, run
 ```
 
 Each SSH connection has both `-L` and `-R`: snapshots and transitions can share
-the same 64 persistent SSH/WAN connections in opposite directions. The adapter
+the same SSH/WAN connections in opposite directions during an active job. The adapter
 disables SSH multiplexing for these connections, never forwards an agent, and
 cleans up only its own SSH children. It emits `peers` and `reverse_peers`; put
 these lists into the appropriate transport configurations. TCP application
@@ -333,10 +334,17 @@ site policy permits. OpenSSH `GatewayPorts` policy can restrict reverse binds;
 do not assume requesting a non-loopback address makes it accessible. Configure
 and verify both routes before starting model applications. This adapter does
 not install credentials or change sshd/firewall policy. Each SSH child has its
-own supervisor: startup failures/disconnections restart only that child using
-the identical local/reverse ports, with 1–30 s exponential backoff. Healthy
-children keep running during recovery. Shutting down the adapter cleans up all
-its own children. The endpoint JSON is published while links start; it describes
+own worker: startup failures/disconnections remain DOWN until the operator
+presses `a` in the relay TUI. One keypress schedules one attempt in an available slot,
+reusing that slot's identical local/reverse ports. Failed manual attempts
+do not retry themselves. Startup concurrency/spacing and a shared failure cooldown
+still limit connection attempts. Healthy tunnels and transport-level chunk retries
+continue independently. The UI reports SSH listener state, not application readiness.
+`q`, Ctrl+C or SIGTERM cleans up all owned SSH/ProxyJump process groups.
+Open tunnels only for active jobs requiring transfers and close them afterward.
+The TUI activates on a terminal; `--no-tui` selects logs only and `--log-file PATH`
+retains diagnostics without corrupting the TUI. The endpoint JSON is published
+while links start; it describes
 stable routes, not proof that every link is ready. `first_port` and
 `reverse.first_port` also preserve endpoints across whole-adapter restarts, so
 live RAM transports can reconnect. If endpoints change, restart a fresh session
@@ -404,3 +412,17 @@ next rollout it waits for JAX updates and both resets, then reads fresh observat
 The final round starts no extra reset. Local warmup remains 10 episodes per robot;
 `--split_warmup_episodes` only controls the split learner. No inter-machine policy
 snapshot or transport sidecar is needed in local mode.
+
+### Interactive relay sizing and throughput
+
+The relay starts 32 tunnels by default, with up to 64 prepared route slots.
+Its English TUI uses `a` to add one, `d` to remove one, and `q` to close its owned
+SSH processes. A disconnected tunnel stays down until the user adds a tunnel;
+there is no automatic SSH reconnect. Closing a link may retry its unfinished
+chunk; closing all links pauses delivery subject to application timeouts.
+
+The learner transport publishes current chunk-ACK throughput, payload progress,
+and recent completed receive throughput in a tiny shared status file. Reporting
+runs on a separate thread, uses atomic replacement without fsync, and never
+copies payloads. Completed averages exclude hash verification/SSH setup/GPU
+installation. See `scripts/split/README.md` for the generated config paths.

@@ -28,6 +28,7 @@ import xxhash
 
 from .buffer import Buffer, receive_packet, send_packet
 from .channel import atomic_json, message_id
+from .transfer_status import RouteState, TransferStatus
 
 
 def receive_into(sock, view):
@@ -271,9 +272,10 @@ class TransferPool:
     it. Only network failures retry; protocol/auth/epoch failures remain fatal.
     Buffers stay owned by the caller until every submitted job completes.
     """
-    def __init__(self, connections, stop, fallback_peers=None):
+    def __init__(self, connections, stop, fallback_peers=None, eligible=None):
         self.connections, self.stop = connections, stop
         self.fallback_peers = fallback_peers
+        self.eligible = eligible
         self.closed = threading.Event()
         self.error = None
         self.jobs = queue.Queue()
@@ -306,6 +308,10 @@ class TransferPool:
     def _worker(self, conn):
         delay = .2
         while not self.stop.is_set() and not self.closed.is_set() and self.error is None:
+            if self.eligible and not self.eligible(conn):
+                conn.close()
+                self.closed.wait(.1)
+                continue
             try:
                 future, operation = self.jobs.get(timeout=.1)
             except queue.Empty:
@@ -390,6 +396,8 @@ class Transport:
                               connect_timeout=config.get('connect_timeout', 5))
         self.bulk = [connection(i) for i in range(count)]
         self.small = [connection(i) for i in range(config.get('record_connections', 4))]
+        self.routes = RouteState(config.get('relay_state_file'))
+        self.metrics = TransferStatus(config['stats_file'], self.routes, count) if config.get('stats_file') else None
 
     def _send_small(self, meta, connection):
         buffer = self.store.outbox[meta['id']][1]
@@ -400,26 +408,56 @@ class Transport:
     def _send_bulk(self, meta, pool):
         buffer = self.store.outbox[meta['id']][1]
         started = time.monotonic()
-        status = pool.result(pool.submit(lambda conn: conn.call({'op': 'offer', 'meta': meta})))
-        if not status['complete']:
-            def stream(conn, index):
-                offset = index * status['chunk_bytes']
-                with buffer.view(offset, min(offset + status['chunk_bytes'], buffer.size)) as data:
-                    return conn.call({'op': 'chunk', 'id': meta['id'], 'index': index}, data)
-            futures = [pool.submit(lambda conn, index=index: stream(conn, index)) for index in status['missing']]
-            for future in futures:
-                pool.result(future)
-            result = pool.result(pool.submit(lambda conn: conn.call({'op': 'commit', 'meta': meta})))
-            logging.info('RAM_TRANSFER bytes=%d connections=%d send_through_verify_seconds=%.6f receiver=%s',
-                         buffer.size, len(self.bulk), time.monotonic() - started, result.get('timings'))
-        self.store.acknowledged(meta)
+        if self.metrics:
+            self.metrics.begin(meta)
+            self.metrics.snapshot()  # Capture initial tunnel count even for tiny transfers.
+        try:
+            status = pool.result(pool.submit(lambda conn: conn.call({'op': 'offer', 'meta': meta})))
+            timings = None
+            if not status['complete']:
+                def stream(conn, index):
+                    offset = index * status['chunk_bytes']
+                    with buffer.view(offset, min(offset + status['chunk_bytes'], buffer.size)) as data:
+                        reply = conn.call({'op': 'chunk', 'id': meta['id'], 'index': index}, data)
+                        if self.metrics:
+                            self.metrics.acknowledged(len(data))
+                        return reply
+                futures = [pool.submit(lambda conn, index=index: stream(conn, index)) for index in status['missing']]
+                for future in futures:
+                    pool.result(future)
+                if self.metrics:
+                    self.metrics.verifying()
+                result = pool.result(pool.submit(lambda conn: conn.call({'op': 'commit', 'meta': meta})))
+                timings = result.get('timings')
+                logging.info('RAM_TRANSFER bytes=%d connections=%d send_through_verify_seconds=%.6f receiver=%s',
+                             buffer.size, len(self.bulk), time.monotonic() - started, timings)
+            if self.metrics:
+                self.metrics.snapshot()
+                self.metrics.finish(timings)
+            self.store.acknowledged(meta)
+        except BaseException:
+            if self.metrics:
+                self.metrics.finish(failed=True)
+            raise
 
     def _sender(self, bulk):
         connections = self.bulk if bulk else self.small
         # Bulk workers map to the independent WAN links. Small/control workers
         # can rotate through every endpoint even when their pool is smaller.
         fallback = None if bulk and len(connections) >= len(self.config['peers']) else self.config['peers']
-        with TransferPool(connections, self.stop, fallback) as pool:
+        def eligible(conn):
+            indices = self.routes.indices()
+            if bulk:
+                return self.config['peers'].index(conn.endpoint) in indices
+            if not indices:
+                return False
+            endpoint = self.config['peers'][indices[connections.index(conn) % len(indices)]]
+            if conn.endpoint != endpoint:
+                conn.close()
+                conn.endpoint = endpoint
+            return True
+        with TransferPool(connections, self.stop, fallback,
+                          eligible if self.routes.path else None) as pool:
             pending = {}
             while not self.stop.is_set():
                 try:
@@ -551,6 +589,8 @@ class Transport:
             socket_path.chmod(0o600)
             servers = [threading.Thread(target=s.serve_forever, kwargs={'poll_interval': .1}) for s in (server, local)]
             senders = [threading.Thread(target=self._sender, args=(b,)) for b in (False, True)]
+            if self.metrics:
+                senders.append(threading.Thread(target=self.metrics.run, args=(self.stop,)))
             for thread in servers + senders:
                 thread.start()
             atomic_json(self.root / 'transport-ready.json', dict(pid=os.getpid(), epoch=self.epoch, address=server.server_address))

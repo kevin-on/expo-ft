@@ -319,5 +319,74 @@ class ValidationTest(unittest.TestCase):
                 self.assertEqual(record['is_hil'], i == 0)
 
 
+
+class DynamicRelayTest(unittest.TestCase):
+    setUp = TransportTest.setUp
+    tearDown = TransportTest.tearDown
+
+    def configure_transport(self):
+        self.state = self.root / 'relay-state.json'
+        self.stats = self.root / 'transfer-stats.json'
+        self.set_routes([])
+        config = self.configs[0]
+        config.update(relay_state_file=str(self.state), stats_file=str(self.stats),
+                      parallel_connections=2, chunk_bytes=4 * 1024**2)
+        config['peers'] = [['127.0.0.1', port()], config['peers'][0]]
+        self.configs[1]['chunk_bytes'] = 4 * 1024**2
+
+    def set_routes(self, active):
+        temporary = self.state.with_suffix('.tmp')
+        temporary.write_text(json.dumps(dict(updated=time.time(), active=active)))
+        temporary.replace(self.state)
+        if hasattr(self, 'transports'):
+            self.transports[0].routes.checked = 0
+
+    def wait_for(self, predicate):
+        deadline = time.monotonic() + 8
+        while not predicate():
+            if time.monotonic() > deadline:
+                self.fail('condition timed out')
+            time.sleep(.01)
+
+    def test_pause_resume_transfer_and_telemetry(self):
+        # Four 4 MiB chunks, deliberately slowed only to exercise live changes.
+        from unittest.mock import patch
+        payload = b'x' * (16 * 1024**2)
+        original = self.transports[1].store.chunk
+        def slow_chunk(*args):
+            time.sleep(.35)
+            return original(*args)
+        sender = self.transports[0]
+        with patch.object(self.transports[1].store, 'chunk', side_effect=slow_chunk):
+            with Buffer.from_bytes(payload) as buffer:
+                self.channels[0].send_buffer('policy', 'dynamic', buffer)
+            time.sleep(.2)
+            self.assertFalse(sender.store.sent)
+            self.assertTrue(all(c.sock is None for c in sender.bulk))
+            self.set_routes([1])
+            self.wait_for(lambda: sender.metrics.current and sender.metrics.current['done'] >= 4*1024**2)
+            self.set_routes([])
+            time.sleep(.8)
+            self.assertFalse(sender.store.sent)
+            self.wait_for(lambda: self.stats.exists() and
+                          json.loads(self.stats.read_text())['current']['tunnels'][-1] == 0)
+            self.set_routes([1])
+            with self.channels[1].receive_buffer('policy', 'dynamic') as buffer, buffer.view() as view:
+                self.assertEqual(view, payload)
+            self.channels[0].wait_sent('policy', 'dynamic')
+            self.channels[1].release('policy', 'dynamic')
+            self.wait_for(lambda: json.loads(self.stats.read_text())['history'])
+            stats = json.loads(self.stats.read_text())
+            self.assertIsNone(stats['current'])
+            row = stats['history'][-1]
+            self.assertEqual(row['size'], len(payload))
+            self.assertEqual(row['done'], len(payload))
+            self.assertEqual(row['phase'], 'Complete')
+            self.assertGreater(row['MBps'], 0)
+            self.assertIn(0, row['tunnels'])
+            self.assertIn(1, row['tunnels'])
+            self.assertIsNone(sender.bulk[0].sock)  # unused slot never dialed
+
+
 if __name__ == '__main__':
     unittest.main()

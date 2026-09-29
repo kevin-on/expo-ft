@@ -64,7 +64,7 @@ Last verified state, **2026-09-27**, not a reservation guarantee:
 | ILIAD inference | job `17637291`, node `iliad-hgx-1`, H200 x1 |
 | DeltaAI relay host | `gh-login03`, `172.28.80.9` |
 | Running WS agent / relay terminals | tmux `expo-wan-relay`, windows `agent`, `relay` |
-| Persistent relay deployment | `/work/hdd/bgqe/kon/expo-ft/split-validation/20260927-relay-reuse` |
+| Historical relay deployment | `/work/hdd/bgqe/kon/expo-ft/split-validation/20260927-relay-reuse` |
 | WS relay auxiliary files | `/scr/kevinon/workspace/expo-ft-split-validation/20260926-production-net/private` |
 | Last mock verification | `/scr/kevinon/workspace/expo-ft-validation/20260927-fork-10hz-5/REPORT.md` |
 
@@ -185,7 +185,7 @@ both checksums against the WS values, extract EXPO into `repo/` and OpenPI into
 Record full commit IDs and archive hashes. Never copy client/.venv across
 architectures or source models from the split worktree implicitly.
 
-## 4. Prepare the new run; reuse a live relay
+## 4. Prepare the new run; start an on-demand relay
 
 On WS:
 
@@ -208,11 +208,41 @@ Its old run-name merely identifies the SSH route/authentication socket. The new
 application RUN uses its own TLS/token and mailbox through the same forwarded
 ports; do not replace files under the live relay directory.
 
-For the recorded current route, keep tmux `expo-wan-relay` alive. On gh-login03,
-`ps -eo pid,ppid,args` can locate the relay supervisor (last observed 4068312);
-verify its children/endpoints instead of trusting that old PID. Endpoint metadata
-is in its `link/relay-endpoints.json`. The supervisor restarts failed SSH links
-independently; healthy links continue transferring.
+Use the relay only while an active job needs transfers; do not keep idle tunnels
+running between experiments. On gh-login03, `ps -eo pid,ppid,args` can locate the
+relay process; verify its children/endpoints rather than trusting historical PIDs.
+Endpoint metadata is in `link/relay-endpoints.json`.
+
+The English relay TUI focuses on transfer speed: connected/connecting counts,
+current acknowledged-payload MB/s, bytes completed/total, elapsed time, recent
+completed transfers with average MB/s and tunnel-count changes, and the last SSH
+error. It shows Idle between transfers and marks missing/stale telemetry explicitly.
+
+- `a`: add one tunnel in an unused/down slot (one attempt, no automatic retries).
+- `d`: close one active/queued tunnel. In-flight chunks on that connection may retry.
+- `q`, Ctrl+C or SIGTERM: close all SSH process groups owned by this relay,
+  including ProxyJump children. Unrelated SSH masters/forwards are preserved.
+
+`CONNECTIONS=32` is the initial count; the prepared route capacity is 64. Both
+transport configurations retain all 64 endpoint slots so additions work without
+restarting the models. The learner reads `link/relay-state.json` and schedules
+only on active routes. Reverse/control traffic can retry through the remaining
+routes. Closing every tunnel pauses transfers until a tunnel is manually added;
+application deadlines still apply. There is no automatic SSH reconnection.
+
+The learner writes tiny volatile `transfer-stats.json` snapshots twice per second
+from a separate telemetry thread; payloads stay in RAM. The relay reads this file
+on the shared Delta filesystem, with no extra SSH connection. Current speed uses
+chunk ACKs; completed speed uses receiver payload time and excludes hash checking,
+SSH establishment, model loading and GPU installation. Displayed tunnel counts
+are sampled, so very brief changes between samples may not appear.
+
+Fresh `workstation.sh prepare` wires these paths automatically. Existing prepared
+runs need regenerated/matched configs (64 peer slots, learner `relay_state_file`
+and `stats_file`, relay `max_connections`, `state_file` and `stats_file`); never
+replace a running experiment's configs. Historical relays without telemetry show
+"unavailable", not an invented speed. `run_relay.sh` preserves the TTY and writes
+logs to `RUN/relay.log`. Use `--no-tui` for log-only operation.
 
 **No suitable relay yet:** after preparation, start the following once.
 
@@ -233,7 +263,7 @@ bash run_relay.sh "$RUN"
 
 A working DeltaAI multiplex SSH master is needed for the dedicated Stanford-key
 agent's socket forward. Do not copy private keys to clusters. Connections use
-64 SSH tunnels, 4MiB chunks, listener ports 24101/24102 and forwarded ranges 24200–24263 / 24300–24363.
+32 initial SSH tunnels (adjustable up to 64), 4MiB chunks, listener ports 24101/24102 and forwarded ranges 24200–24263 / 24300–24363.
 Only one model/transport session can own those ports at a time. Do not start a
 second relay merely because a new model run has a different name.
 
@@ -297,7 +327,7 @@ Latest reproducible profiling bundle, prepared from fork on 2026-09-27:
   `/tmp/expo-xxh3-batch-JOB/`; original recordings are never modified.
 
 On the **same verified allocations**, with no model/transport step using the
-ports, choose the same fresh ATTEMPT in both commands. Keep relay/agent alive.
+ports, choose the same fresh ATTEMPT in both commands. Keep the relay/agent alive only for the active test, then close them.
 
 DeltaAI login:
 
@@ -451,7 +481,8 @@ manual saving to an already-running older process.
   for the separate 2026-09-28 eight-GPU results and their measurement scope.
 - Stop robot clients first if running, then stop only the two role commands/test
   steps. Their handlers stop their own model/mock/transport children. Keep the
-  relay and WS agent for sequential runs on the same hosts/ports.
+  relay only while the active experiment requires transfers. Close its TUI with
+  `q` and stop its dedicated agent forward when finished; do not leave idle tunnels.
 - To stop a specific Slurm step: `scancel --signal=TERM JOB.STEP` after checking
   its identity. `scancel JOB` returns the entire held allocation; do that only
   when requested. Verify remaining steps after tests.
