@@ -98,6 +98,9 @@ def _merge_params(agent: Any, params: dict[str, at.Params]) -> Any:
 
 
 def restore_checkpoint(checkpoint_manager, agent, step: int | None = None):
+    from expo_ft.utils.model_config import read_record, validate_agent
+    saved_step = checkpoint_manager.latest_step() if step is None else step
+    validate_agent(read_record(checkpoint_manager.directory / str(saved_step)), agent)
     agent, params = _split_params(agent)
     # Explicit restore_args from the live (current-topology) shardings, so a
     # checkpoint saved on a different device count can be resharded at load.
@@ -121,8 +124,12 @@ def save_checkpoint(
     agent: Any,
     step: int,
 ):
+    record = getattr(agent.actor, "checkpoint_record", None)
+    if record is None:
+        raise ValueError("Missing checkpoint model config")
     agent, params = _split_params(agent)
     items = {
+        "model_config": record,
         "agent": agent,
         "params": params,
     }

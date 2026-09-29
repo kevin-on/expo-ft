@@ -88,3 +88,11 @@ Retained evidence, with distinct scopes:
 - Distributed sampler and final eight-GPU run: `/scr/kevinon/workspace/expo-ft-validation/20260928-distributed-sampler/REPORT.md`.
 
 Keep these bundles and live relay auxiliary files; they are not disposable logs.
+
+- `test_model_config.py`: SFT/EXPO metadata, camera omission, override drift, resume and normalization checks (CPU in the full learner environment).
+- `gpu/checkpoint_config.py`: real SFT inference, one online update and independent checkpoint restore/action parity, using recorded observations only.
+
+If the read-only compute image lacks pytest, install it into node-local scratch:
+`python -m pip install --target /cache/test-deps pytest`, then prepend
+`/cache/test-deps` to `PYTHONPATH` for test commands only. Do not rebuild the shared
+runtime or alter a running robot's environment for test dependencies.

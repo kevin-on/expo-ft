@@ -36,6 +36,8 @@ config_flags.DEFINE_config_file(
 )
 
 FLAGS = flags.FLAGS
+flags.DEFINE_enum("checkpoint_kind", "online", ["sft", "online"], "Checkpoint model kind")
+flags.DEFINE_string("initial_sft_checkpoint", "", "Relocate original SFT assets for online eval")
 flags.DEFINE_string("dataset_path", "", "Path to DROID dataset (for example_action).")
 flags.DEFINE_integer("num_data", 1, "Number of episodes to load from dataset (only need 1 for example_action).")
 flags.DEFINE_integer("seed", 42, "Random seed.")
@@ -59,21 +61,8 @@ flags.DEFINE_boolean("mirror_y", False, "Mirror RGB/Cartesian pose and invert ac
 flags.DEFINE_string("client_video_dir", "", "Video directory on the workstation; overrides the derived path.")
 
 
-def main(_):
-    config = FLAGS.config
-    config_task = FLAGS.config_task
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-    )
-    logger = logging.getLogger(__name__)
-
-    if config_task.env_type != "droid":
-        raise ValueError(
-            "This script is for DROID evaluation only; config_task.env_type must be 'droid'."
-        )
-
+def _load_legacy_policy(config, config_task, logger):
+    """Preserve experimental BC/RTC evaluation; EXPO never uses this path."""
     if not FLAGS.dataset_path:
         raise ValueError("--dataset_path is required.")
 
@@ -193,6 +182,49 @@ def main(_):
 
     if hasattr(agent, 'cache_infer_params'):
         agent = agent.cache_infer_params()
+
+    return agent, step
+
+
+def main(_):
+    config_task = FLAGS.config_task
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    legacy = FLAGS.config.model_cls != 'EXPOLearner' and FLAGS.checkpoint_kind == 'online'
+    if legacy:
+        config = FLAGS.config
+        agent, step = _load_legacy_policy(config, config_task, logger)
+        model_cls = config.model_cls
+    else:
+        if not FLAGS.checkpoint_dir or FLAGS.delay != 0:
+            raise ValueError("Select a completed checkpoint step; checkpoint eval uses delay=0")
+        if any(FLAGS[name].present for name in FLAGS if name == 'config' or name.startswith('config.')):
+            raise ValueError("Evaluation reads model config from the checkpoint; remove --config")
+        if any(FLAGS[k].present for k in ('dataset_path', 'num_data', 'checkpoint_step', 'fsdp_devices')):
+            raise ValueError('Eval takes a completed checkpoint step, no dataset/checkpoint_step/fsdp overrides')
+        if FLAGS.num_episodes < 1:
+            raise ValueError('num_episodes must be positive')
+        from expo_ft.env.checkpoint_policy import SFTPolicy, OnlinePolicy
+        if FLAGS.checkpoint_kind == 'sft':
+            agent = SFTPolicy(FLAGS.checkpoint_dir, seed=FLAGS.seed, prompt=config_task.language_instruction)
+            FLAGS.only_base_actions = True
+        else:
+            agent = OnlinePolicy(FLAGS.checkpoint_dir, task=config_task,
+                                 initial_sft_checkpoint=FLAGS.initial_sft_checkpoint or None, seed=FLAGS.seed)
+            if FLAGS.replan_steps != agent.record['replan_steps'] and FLAGS['replan_steps'].present:
+                raise ValueError("replan_steps differs from the online checkpoint")
+            FLAGS.replan_steps = agent.record['replan_steps']
+            if FLAGS.only_base_actions:
+                raise ValueError("Online evaluation uses full EXPO action selection")
+        if not 0 < FLAGS.replan_steps <= agent.config.model.action_horizon:
+            raise ValueError("replan_steps must fit the checkpoint action horizon")
+        config = None
+        step = os.path.basename(os.path.normpath(FLAGS.checkpoint_dir))
+        model_cls = 'SFT' if FLAGS.checkpoint_kind == 'sft' else 'EXPOLearner'
+    example_action = config_task.example_action
+    task_description = config_task.language_instruction
+    max_traj_len = config_task.auto_reset_steps
+    dt = 1.0 / config_task.control_hz
 
     video_dir = None
     if FLAGS.save_video and FLAGS.client_video_dir:

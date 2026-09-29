@@ -115,7 +115,9 @@ def identity(agent, task_contract):
                                  'model': model, 'pi05_config': agent.actor.train_config.name,
                                  'use_quantile_norm': agent.actor.data_config.use_quantile_norm,
                                  'policy_metadata': agent.actor.train_config.policy_metadata,
-                                 'sampling': sampling, 'task': task_contract}))
+                                 'sampling': sampling, 'task': task_contract,
+                                 'online_config': {k: v for k, v in getattr(agent.actor, 'checkpoint_record', {}).get('config', {}).items()
+                                                   if k != 'initial_sft_checkpoint'}}))
 
 
 def export_policy(agent, contract, version):

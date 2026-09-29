@@ -155,6 +155,13 @@ def get_batch_info(batch: Dict[str, Any]) -> Dict[str, float]:
 
 
 def build_pi05_config(config):
+    if config.model_cls == "EXPOLearner":
+        from expo_ft.utils.model_config import build_online
+        return build_online(config)
+    return _build_legacy_pi05_config(config)
+
+
+def _build_legacy_pi05_config(config):
     """Extract pi05 settings from agent config and build the openpi train config.
 
     Returns (agent_kwargs, pi05_train_config, pi05_resize_size, model_cls).

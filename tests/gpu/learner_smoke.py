@@ -72,9 +72,6 @@ def main():
     dataset = process_droid_dataset(str(args.dataset), task, num_data=1)
     assert len(dataset) >= 16
     config = get_config()
-    config.pi05_weight_loader_path = str(args.params.resolve())
-    config.pi05_assets_dir = str((args.output/'assets').resolve())
-    config.pi05_asset_id = 'validation-recording'
     state = np.stack([np.concatenate([np.asarray(d['observations']['cartesian_position']).reshape(-1),
                           np.asarray(d['observations']['gripper_position']).reshape(-1)]) for d in dataset])
     actions = np.stack([d['actions'] for d in dataset])
@@ -88,7 +85,9 @@ def main():
         stats[key] = normalize.NormStats(mean=values.mean(axis=0),
             std=np.where(values.std(axis=0)<1e-6,1.0,values.std(axis=0)),q01=lo,q99=hi)
     if args.phase == 'train':
-        normalize.save(args.output/'assets'/config.pi05_asset_id,stats)
+        normalize.save(args.output/'assets'/'validation-recording',stats)
+    from config_fixture import configure
+    configure(config, args.output/'config-fixture', args.params, args.output/'assets', 'validation-recording')
     report('data', transitions=len(dataset), N=config.N, n_edit_samples=config.n_edit_samples,
            num_qs=config.num_qs, initial_weights='pi05_base + initialized LoRA',
            normalization='recording-derived validation fixture')
@@ -98,6 +97,8 @@ def main():
     report('model_init_start')
     actor, actor_state, target, kwargs, metadata = build_pi05(config,42,mesh,data_sharding,
         replicated,args.phase=='restore',task.language_instruction)
+    from expo_ft.utils.model_config import make_record
+    actor.checkpoint_record = make_record(config, task, 8, 1)
     report('model_init_done')
     rb_args=dict(config=config,example_action=dataset[0]['actions'][None],capacity=len(dataset)+16,
                  task_description=task.language_instruction,replan_steps=8,seed=42,delay=0,

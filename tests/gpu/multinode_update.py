@@ -112,9 +112,8 @@ def update(args, mesh):
     import openpi.training.sharding as sharding
 
     config, task = get_config(), get_task()
-    config.pi05_weight_loader_path = str(args.params)
-    config.pi05_assets_dir = str(args.assets)
-    config.pi05_asset_id = args.asset_id
+    from config_fixture import configure
+    configure(config, args.output / ('config-fixture-'+str(jax.process_index())), args.params, args.assets, args.asset_id)
     manifest = json.loads((args.fixture / "manifest.json").read_text())
     reference = pickle.loads((args.fixture / "reference.pkl").read_bytes())
     data = NamedSharding(mesh, P(sharding.DATA_AXIS))

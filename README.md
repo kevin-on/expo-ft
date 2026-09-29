@@ -337,7 +337,7 @@ bash scripts/pick/run_server.sh        # synchronous
 bash scripts/pick/run_server_async.sh  # asynchronous
 ```
 
-<!-- What differs: `--config=configs/model/expo_ft_pi_config.py` (`EXPOLearner`), a `--config.pi05_weight_loader_path` pointing at the SFT checkpoint from step 1, and no `--delay` -- inference blocks at each replan boundary.  -->
+<!-- What differs: `--config=configs/model/expo_ft_pi_config.py` (`EXPOLearner`), an `--initial_sft_checkpoint` pointing at the completed SFT step from step 1, and no `--delay` -- inference blocks at each replan boundary.  -->
 
 > **Async training:** Requires ≥ 2 GPUs (1 sampler + ≥ 1 updater). Use it when one episode takes a long time; otherwise synchronous training can yield better results.
 
@@ -346,7 +346,7 @@ Key parameters to configure in `run_server.sh` and `run_server_async.sh`:
 - `dataset_path` -- path to the collected demonstration data
 - `num_data` -- max offline demo episodes to seed into the replay buffer (0 = all)
 - `config` -- config set to `configs/model/expo_ft_pi_config.py` (`EXPOLearner`)
-- `--config.pi05_weight_loader_path` -- the SFT checkpoint from step 1
+- `--initial_sft_checkpoint` -- the completed SFT step from step 1
 - `update_type` / `num_updates` -- for synchronous training, recommend: use episode updates with `env_steps / num_updates` close to 20-30
 - `step_interval` -- alternative to a fixed `num_updates`: one gradient update per this many collected transitions
 - `edit_scale` -- edit scale
@@ -369,18 +369,16 @@ Parameters should match the corresponding `run_server.sh` or `run_server_async.s
 
 #### Evaluate the mixed two-robot SFT checkpoints
 
-Use the existing `config.pi05_weight_loader_path`, `config.pi05_assets_dir`,
-`config.pi05_asset_id`, `only_base_actions`, and `checkpoint_step=0` settings.
-The launcher sets `N=1` and disables action editing. It runs no model updates;
-existing EXPO initialization still needs one HDF5 episode for input shapes.
+Model settings and normalization are loaded from the checkpoint. See
+[checkpoint configuration](docs/model_config.md) for metadata requirements,
+resume and old artifacts. SFT evaluation loads only the SFT policy and needs no
+training dataset or EXPO model overrides.
 
 Run one robot at a time, with the same robot ID on both hosts:
 
 ```bash
 # Allocated GPU/container shell, in the prepared learner environment.
 export SFT_CHECKPOINT=/path/to/completed/run/3889
-export SFT_ASSET_ID=expo_ft/pick_mixed_100
-export EXPO_DATASET=/path/to/demo/episode-parent
 export EXPO_EVAL_OUTPUT_DIR=/path/to/eval/mixed100-step3889-robot0
 export EXPO_CLIENT_VIDEO_DIR=/scr/kevinon/workspace/expo-ft-fork/data/videos/sft-eval/mixed100-step3889-robot0
 bash scripts/pick/eval_sft_policy.sh 0
@@ -391,7 +389,7 @@ bash scripts/pick/run_sft_eval_client.sh 0
 ```
 
 `SFT_CHECKPOINT` is a completed step directory containing `params/` and
-`assets/$SFT_ASSET_ID/norm_stats.json`; these paths must be visible in the GPU
+`assets/config.json` plus its declared normalization asset; these paths must be visible in the GPU
 container. The scripts do not allocate GPUs, start a container, or set up tunnels.
 Default ports are 8202/8203; override `EXPO_EVAL_BASE_PORT` on both hosts.
 `EXPO_EVAL_EPISODES` defaults to 10, `EXPO_REPLAN_STEPS` to 8, and

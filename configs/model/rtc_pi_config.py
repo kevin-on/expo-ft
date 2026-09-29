@@ -1,10 +1,10 @@
 """Config for RTCLearner: pi0.5 BC with action-prefix conditioning (RTC-SFT)."""
 
-from configs.model import expo_ft_pi_config
+from configs.model import legacy_pi_config
 
 
 def get_config():
-    config = expo_ft_pi_config.get_config()
+    config = legacy_pi_config.get_config()
 
     config.model_cls = "RTCLearner"
 

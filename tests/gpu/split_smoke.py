@@ -104,8 +104,7 @@ def model_role(args):
     task, config = get_task(), get_config()
     task.control_hz = 100000  # no physical clock/hardware in this test
     dataset = process_droid_dataset(str(args.dataset), task, num_data=1)
-    config.pi05_weight_loader_path = str(args.params)
-    config.pi05_assets_dir, config.pi05_asset_id = str(args.output / 'assets'), 'split-fixture'
+    config.initial_sft_checkpoint = str((args.output/'config-fixture').resolve())
     config.N, config.n_edit_samples = 2, 2
     config.actor_success_only = False
     flags = SimpleNamespace(config=config, config_task=task, seed=42, replan_steps=8, num_robot=2,
@@ -172,10 +171,14 @@ def model_role(args):
         stats[k] = normalize.NormStats(mean=v.mean(0), std=np.maximum(v.std(0), 1e-6),
                                       q01=np.where(constant, lo-.5, lo), q99=np.where(constant, hi+.5, hi))
     normalize.save(args.output / 'assets' / 'split-fixture', stats)
+    from config_fixture import configure
+    configure(config, args.output/'config-fixture', args.params, args.output/'assets', 'split-fixture')
     mesh = sharding.make_mesh(1)
     data = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     actor, actor_state, target, kwargs, metadata = build_pi05(config, 42, mesh, data, replicated, False, task.language_instruction)
+    from expo_ft.utils.model_config import make_record
+    actor.checkpoint_record = make_record(config, task, 8, 2)
     rb = dict(config=config, example_action=dataset[0]['actions'][None], capacity=2048,
               task_description=task.language_instruction, replan_steps=8, delay=0, critic_camera_keys=CRITIC_CAMERA_KEYS)
     buffers = [create_replay_buffer(**rb, seed=42+i) for i in range(2)]

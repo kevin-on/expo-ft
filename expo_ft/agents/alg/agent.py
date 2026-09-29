@@ -42,6 +42,7 @@ def initialize_checkpoint_dir(
     item_handlers = {
         "agent": ocp.PyTreeCheckpointHandler(),
         "params": ocp.PyTreeCheckpointHandler(),
+        "model_config": ocp.JsonCheckpointHandler(filename="config.json"),
     }
     mngr = ocp.CheckpointManager(
         checkpoint_dir,

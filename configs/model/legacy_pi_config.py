@@ -1,3 +1,4 @@
+"""Unchanged BC/RTC experimental defaults; EXPO uses checkpoint-owned settings."""
 from configs.model import sac_config
 
 
@@ -30,16 +31,16 @@ def get_config():
     config.encode_batch_split = 1
     config.batch_split = 1
 
-    config.initial_sft_checkpoint = ""
-    config.pi05_learning_rate = 2.5e-5  # Separate from the EXPO edit actor_lr.
-    config.pi05_adam_b1 = 0.9
-    config.pi05_adam_b2 = 0.95
-    config.pi05_adam_eps = 1e-8
-    config.pi05_weight_decay = 1e-10
-    config.pi05_clip_gradient_norm = 1.0
+    config.pi05_config_name = "expo_pi05_droid_lora_finetune_sft_cartesian_state"
+    config.pi05_resize_size = 224
+    config.pi05_omit_image_keys = ("right_wrist_0_rgb",)
     config.freeze_pi05_encoder = True
-    config.freeze_critic_encoder = False
-
+    config.freeze_critic_encoder = False  # if True, encoder is frozen for Q (only extract embeddings)
+    
+    config.pi05_weight_loader_path = "" # pi05 sft checkpoint path
+    # assets_dir is the base path; norm stats are loaded from assets_dir/asset_id.
+    config.pi05_assets_dir = ""
+    config.pi05_asset_id = ""
     config.actor_success_only = True
     config.use_full_augmentation = True  # False = only crop (no rotate/color jitter)
 

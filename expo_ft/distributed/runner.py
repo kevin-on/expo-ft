@@ -272,6 +272,8 @@ def build_inference(flags):
         mesh=mesh, data_sharding=data, replicated_sharding=replicated, resume=False,
         replan_steps=flags.replan_steps, default_prompt=flags.config_task.language_instruction,
         edit_action_xyzg=flags.config_task.edit_action_xyzg)
+    from expo_ft.utils.model_config import make_record
+    actor.checkpoint_record = make_record(flags.config, flags.config_task, flags.replan_steps, flags.num_robot)
     return agent.replace(rng=jax.random.fold_in(jax.random.PRNGKey(flags.seed), 7351))
 
 

@@ -1,3 +1,6 @@
+> Model/config contract: [docs/model_config.md](../../docs/model_config.md).
+> New EXPO runs use `--initial_sft_checkpoint`; old CLI-only metadata needs explicit migration.
+
 # DeltaAI learner / ILIAD inference: operating guide
 
 Start here for this deployment. The workstation checkout is

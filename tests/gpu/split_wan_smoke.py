@@ -280,8 +280,8 @@ def model_role(args):
     reference = pickle.loads((args.fixture / 'reference.pkl').read_bytes())
     task, config = get_task(), get_config()
     task.control_hz = args.playback_hz  # recorded playback only; never real hardware
-    config.pi05_weight_loader_path = str(args.params)
-    config.pi05_assets_dir, config.pi05_asset_id = str(args.assets), args.asset_id
+    from config_fixture import configure
+    configure(config, args.output / ('config-fixture-'+str(jax.process_index())+'-'+args.role), args.params, args.assets, args.asset_id)
     flags = SimpleNamespace(config=config, config_task=task, seed=42, replan_steps=8, num_robot=2,
         split_session=args.session, split_mailbox=args.mailbox, split_timeout=1800, resume=False,
         split_warmup_episodes=args.warmup_episodes,
@@ -382,6 +382,8 @@ def model_role(args):
     data = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     actor, actor_state, target, kwargs, metadata = build_pi05(config, 42, mesh, data, replicated, False, task.language_instruction)
+    from expo_ft.utils.model_config import make_record
+    actor.checkpoint_record = make_record(config, task, 8, 2)
     buffer_args = dict(config=config, example_action=reference['actions'][None],
         capacity=manifest['transitions'] + 1024, task_description=task.language_instruction,
         replan_steps=8, delay=0, critic_camera_keys=CRITIC_CAMERA_KEYS)
