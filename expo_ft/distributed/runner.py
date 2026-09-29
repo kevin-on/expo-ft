@@ -8,6 +8,7 @@ import logging
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 import re
+import sys
 import time
 
 import jax
@@ -16,6 +17,9 @@ import numpy as np
 from .channel import Channel, atomic_json
 from .policy import export_policy, import_policy, identity
 from .protocol import key, receive_round, task_contract
+from .learner_group import LearnerGroup, local_value, replicate
+from expo_ft.utils.log_utils import log_round_interventions
+from expo_ft.utils.rollout_dashboard import RolloutDashboard
 
 
 def _channel(flags):
@@ -49,23 +53,33 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
     from expo_ft.utils.robot_round import updates_for_round
 
     directory = Path(checkpoint_dir)
-    channel = _channel(flags)
+    group = LearnerGroup()
+    channel = None
+
+    def connect():
+        nonlocal channel
+        channel = _channel(flags)
+
+    group.call(connect)
     session = flags.split_session
     contract = identity(agent, task_contract(flags, mirror_robot))
+    if group.call(lambda: contract) != contract:
+        raise ValueError('learner nodes have different policy identities')
     episode_count, pending_steps, step, round_id = 0, 0, start_step, 0
     combine_rng = jax.random.PRNGKey(flags.seed + 100)
     inference_rng = None
     if resuming:
-        state = json.loads((directory / f'split-{start_step}.json').read_text())
+        state = group.call(lambda: json.loads((directory / f'split-{start_step}.json').read_text()))
         if state['identity'] != contract:
             raise ValueError('split resume contract changed')
         if state['last_session'] == session:
             raise ValueError('resume requires a fresh session ID')
         episode_count, pending_steps = state['episode_count'], state['pending_steps']
-        combine_rng = jax.device_put(np.asarray(state['combine_rng'], dtype=np.uint32), replicated_sharding)
+        combine_rng = replicate(np.asarray(state['combine_rng'], dtype=np.uint32), replicated_sharding)
         inference_rng = state['inference_rng']
-        prepare_robot_replay_resume(directory, up_to_step=step, num_robot=len(buffers),
-                                   abandoned_dir=directory / 'abandoned-replay' / session)
+        group.call(lambda: prepare_robot_replay_resume(
+            directory, up_to_step=step, num_robot=len(buffers),
+            abandoned_dir=directory / 'abandoned-replay' / session))
         for index, buffer in enumerate(buffers):
             restore_replay_buffer(directory / f'robot-{index}', buffer, up_to_step=start_step)
             buffer.restore_success_marks()
@@ -81,55 +95,68 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             policy_metrics.update(policy_bytes=snapshot.size, export_seconds=serialized - started,
                                   hash_handoff_seconds=time.monotonic() - serialized)
 
-    publish_policy()
+    group.call(publish_policy)
     last_checkpoint = start_step
+    save_request = directory / 'save.request'
 
     def checkpoint():
         # The checkpoint cursor is independent from transport receipt IDs.
-        atomic_json(directory / f'split-{step}.json', {
+        group.call(lambda: atomic_json(directory / f'split-{step}.json', {
             'identity': contract, 'episode_count': episode_count, 'pending_steps': pending_steps,
-            'combine_rng': np.asarray(jax.device_get(combine_rng)).tolist(),
+            'combine_rng': local_value(combine_rng).tolist(),
             'inference_rng': inference_rng, 'last_session': session, 'last_round': round_id,
-        })
+        }))
         save_checkpoint(checkpoint_manager, agent, step)
 
     try:
         while step < flags.max_steps:
-            channel.send('admit', key(session, round_id), {
-                'version': version, 'identity': contract, 'inference_rng': inference_rng if round_id == 0 else None,
-            })
-            channel.flush()
-            ready = channel.receive('installed', key(session, round_id))
+            def admit():
+                channel.send('admit', key(session, round_id), {
+                    'version': version, 'identity': contract, 'inference_rng': inference_rng if round_id == 0 else None,
+                })
+                channel.flush()
+                return channel.receive('installed', key(session, round_id))
+
+            ready = group.call(admit)
             if ready['version'] != version:
                 raise ValueError('inference has not installed the required version')
             if policy_started is not None:
                 policy_metrics.update(ready.get('timings', {}))
                 policy_metrics['through_inference_ready_seconds'] = time.monotonic() - policy_started
                 logging.info('POLICY_READY version=%d timing=%s', version, policy_metrics)
-                wandb.log({f'split/{k}': v for k, v in policy_metrics.items()}, step=step)
+                if group.leader:
+                    wandb.log({f'split/{k}': v for k, v in policy_metrics.items()}, step=step)
                 policy_started = None
-            episodes = receive_round(channel, session, round_id, version, flags.num_robot)
-            finished = channel.receive('round_finished', key(session, round_id))
+            def receive():
+                episodes = receive_round(channel, session, round_id, version, flags.num_robot)
+                finished = channel.receive('round_finished', key(session, round_id))
+                return episodes, finished
+
+            episodes, finished = group.call(receive)
             if finished['version'] != version:
                 raise ValueError('round completion version mismatch')
             inference_rng = finished['inference_rng']
             # Persist both episodes before releasing transport buffers or admitting
             # the round to replay. A failed save cannot permit reset/update.
-            next_step = step + 1
-            for robot, (records, success) in enumerate(episodes):
+            for records, success in episodes:
                 for record in records:
                     record['is_success'] = success
-                if flags.checkpoint_buffer:
-                    save_replay_buffer_batch(directory / f'robot-{robot}', records, start_step=next_step)
-                next_step += len(records)
-            # Small transport receipts remain for deduplication. With replay
-            # checkpointing disabled, persistence is deliberately skipped.
-            for robot, (records, _) in enumerate(episodes):
-                for index in range(len(records)):
-                    channel.release('transition', key(session, round_id, robot, index))
-                channel.release('episode_end', key(session, round_id, robot))
-            channel.release('installed', key(session, round_id))
-            channel.release('round_finished', key(session, round_id))
+
+            def persist_and_release():
+                next_step = step + 1
+                for robot, (records, success) in enumerate(episodes):
+                    if flags.checkpoint_buffer:
+                        save_replay_buffer_batch(directory / f'robot-{robot}', records, start_step=next_step)
+                    next_step += len(records)
+                # Small transport receipts remain for deduplication. With replay
+                # checkpointing disabled, persistence is deliberately skipped.
+                for robot, (records, _) in enumerate(episodes):
+                    for index in range(len(records)):
+                        channel.release('transition', key(session, round_id, robot, index))
+                    channel.release('episode_end', key(session, round_id, robot))
+                channel.release('installed', key(session, round_id))
+                channel.release('round_finished', key(session, round_id))
+            group.call(persist_and_release)
             metrics = {}
             round_steps = sum(len(records) for records, _ in episodes)
             for robot, (buffer, (records, success)) in enumerate(zip(buffers, episodes)):
@@ -146,48 +173,68 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             if step < flags.max_steps:
                 # Permit only the next reset. The normal admit/policy messages
                 # still gate rollout until updates and checkpointing finish.
-                channel.send('prepare_reset', key(session, round_id + 1), {'identity': contract})
-                channel.flush()
+                group.barrier('replay-ready')
+                def prepare_reset():
+                    channel.send('prepare_reset', key(session, round_id + 1), {'identity': contract})
+                    channel.flush()
+                group.call(prepare_reset)
             update_started = time.monotonic()
             for _ in range(count):
-                batch, actor_batch, combine_rng = batch_processor.next_batch(combine_rng)
+                sample_args = ({'update_step': int(local_value(agent.actor_train_state.step))}
+                               if group.size > 1 else {})
+                batch, actor_batch, combine_rng = batch_processor.next_batch(combine_rng, **sample_args)
                 agent = agent.replace(rng=jax.device_put(agent.rng, replicated_sharding))
                 agent, info = agent.update(agent, batch, flags.utd_ratio, actor_batch)
                 jax.block_until_ready(info)
-                if not all(np.isfinite(np.asarray(v)).all() for v in jax.tree.leaves(jax.device_get(info))):
+                info = jax.tree.map(local_value, info)
+                if not all(np.isfinite(v).all() for v in jax.tree.leaves(info)):
                     raise FloatingPointError('nonfinite learner update; no new policy admitted')
                 metrics.update({f'training/{name}': value for name, value in info.items()})
             update_finished = time.monotonic()
             if count:
                 metrics['split/update_seconds'] = update_finished - update_started
             episode_count += len(episodes)
+            log_round_interventions(episodes, metrics)
             metrics.update(episodes=episode_count, updates=count, round_steps=round_steps, policy_version=version)
             # Leave this step open for the next installed-policy timing ACK.
             # Otherwise W&B discards that second log at the already-committed step.
-            wandb.log(metrics, step=step, commit=not (count and step < flags.max_steps))
+            if group.leader:
+                wandb.log(metrics, step=step, commit=not (count and step < flags.max_steps))
             logging.info('Split round %d complete: %d episodes, %d transitions, %d updates', round_id, episode_count, step, count)
-            if flags.checkpoint_model and flags.checkpoint_interval > 0 and step - last_checkpoint >= flags.checkpoint_interval:
+            manual_save = group.call(save_request.is_file)
+            if manual_save or (flags.checkpoint_model and flags.checkpoint_interval > 0
+                               and step - last_checkpoint >= flags.checkpoint_interval):
                 checkpoint()
+                if manual_save:
+                    checkpoint_manager.wait_until_finished()
+                    group.barrier('manual-checkpoint-saved')
+                    group.call(lambda: save_request.unlink(missing_ok=True))
+                    if group.leader:
+                        logging.info('Manual checkpoint saved at step %d in %s', step, directory)
                 last_checkpoint = step
             if count and step < flags.max_steps:
                 version = step
                 policy_started = update_finished
                 policy_metrics = {}
-                publish_policy()
+                group.call(publish_policy)
             round_id += 1
         if flags.checkpoint_model and step != last_checkpoint:
             checkpoint()
         # After any completed round inference waits for reset permission first.
         # A resume already at max_steps has no previous round and waits on admit.
         stop_topic = 'prepare_reset' if round_id else 'admit'
-        channel.send(stop_topic, key(session, round_id), {'stop': True})
-        channel.flush()
-        channel.receive('stopped', session)
+        def stop_inference():
+            channel.send(stop_topic, key(session, round_id), {'stop': True})
+            channel.flush()
+            return channel.receive('stopped', session)
+        group.call(stop_inference)
     except BaseException:
-        _abort(channel, session)
+        if group.leader:
+            _abort(channel, session)
         raise
     finally:
-        channel.close()
+        if channel is not None:
+            channel.close()
         checkpoint_manager.wait_until_finished()
     return agent
 
@@ -234,6 +281,13 @@ def run_inference(flags, agent=None, env_factory=None):
 
     if flags.resume:
         raise ValueError('Only learner uses --resume; inference receives RNG/policy from learner')
+    dashboard = None
+    if getattr(flags, 'rollout_dashboard', False):
+        if not sys.stdin.isatty() or not sys.stdout.isatty() or not flags.rollout_log:
+            raise ValueError('Rollout dashboard requires ssh -tt / srun --pty and --rollout_log')
+        dashboard = RolloutDashboard(flags.num_robot, flags.config_task.auto_reset_steps, flags.rollout_mode)
+    elif getattr(flags, 'rollout_mode', 'auto') == 'manual':
+        raise ValueError('Manual rollout requires --rollout_dashboard')
     agent = build_inference(flags) if agent is None else agent
     mirror_robot = 1 if flags.num_robot == 2 else None
     contract = identity(agent, task_contract(flags, mirror_robot))
@@ -243,12 +297,28 @@ def run_inference(flags, agent=None, env_factory=None):
     reset_workers = ThreadPoolExecutor(max_workers=flags.num_robot, thread_name_prefix='robot-reset')
     resets = []
 
-    def begin_resets():
+    def check_session():
+        if dashboard is not None:
+            dashboard.check()
         channel.check_session()
+
+    def reset_robot(robot, env):
+        if dashboard is not None:
+            dashboard.resetting(robot)
+        env.reset_only()
+        if dashboard is not None:
+            dashboard.reset_done(robot)
+
+    def begin_resets():
+        check_session()
         logging.info('Split round %d: resetting %d robots while waiting for policy', round_id, len(envs))
-        return [reset_workers.submit(env.reset_only) for env in envs]
+        if dashboard is not None:
+            dashboard.set_phase('Reset + learner update / policy transfer')
+        return [reset_workers.submit(reset_robot, robot, env) for robot, env in enumerate(envs)]
 
     def check_reset_errors():
+        if dashboard is not None:
+            dashboard.check()
         for reset in resets:
             if reset.done():
                 reset.result()
@@ -256,11 +326,11 @@ def run_inference(flags, agent=None, env_factory=None):
     def finish_resets():
         pending = set(resets)
         while pending:
-            channel.check_session()
+            check_session()
             done, pending = wait(pending, timeout=.1, return_when=FIRST_COMPLETED)
             for reset in done:
                 reset.result()
-        channel.check_session()
+        check_session()
 
     def acknowledge_stop():
         channel.send('stopped', session, {'stopped': True})
@@ -268,9 +338,11 @@ def run_inference(flags, agent=None, env_factory=None):
         channel.wait_sent('stopped', session)
 
     try:
+        if dashboard is not None:
+            dashboard.start(flags.rollout_log)
         while True:
             if round_id:
-                prepare = channel.receive('prepare_reset', key(session, round_id))
+                prepare = channel.receive('prepare_reset', key(session, round_id), check=check_reset_errors)
                 channel.release('prepare_reset', key(session, round_id))
                 if prepare.get('stop'):
                     acknowledge_stop()
@@ -288,6 +360,8 @@ def run_inference(flags, agent=None, env_factory=None):
             version = admit['version']
             install_metrics = {}
             if installed != version:
+                if dashboard is not None:
+                    dashboard.set_phase('Receiving / installing policy')
                 with channel.receive_buffer('policy', key(session, version), check=check_reset_errors) as snapshot:
                     started = time.monotonic()
                     agent = import_policy(agent, snapshot, contract, version)
@@ -314,23 +388,37 @@ def run_inference(flags, agent=None, env_factory=None):
             channel.send('installed', key(session, round_id), {'version': version, 'timings': install_metrics})
             finish_resets()
             resets = []
+            if dashboard is not None:
+                dashboard.ready(round_id, version)
             def sample(observation):
                 nonlocal agent
                 actions, agent, _ = agent.sample_actions(observation)
                 return np.asarray(jax.device_get(actions))
             def transition(robot, step, record):
                 channel.send('transition', key(session, round_id, robot, step), {'version': version, 'transition': record})
+                if dashboard is not None:
+                    dashboard.step(robot, step + 1, record['is_hil'])
             def end(robot, length, success):
                 channel.send('episode_end', key(session, round_id, robot), {'version': version, 'length': length, 'success': bool(success)})
+                if dashboard is not None:
+                    dashboard.episode_done(robot, success)
             collect_round(envs, sample, flags.replan_steps, flags.config_task.control_hz,
                           mirror_robot=mirror_robot, on_transition=transition, on_episode_end=end,
-                          check_session=channel.check_session, reset_done=True)
+                          check_session=check_session, reset_done=True,
+                          **({'wait_for_start': dashboard.wait_for_start} if dashboard is not None else {}))
+            if dashboard is not None:
+                dashboard.set_phase('Both episodes done; waiting for learner / replay')
             channel.send('round_finished', key(session, round_id), {
                 'version': version, 'inference_rng': np.asarray(jax.device_get(agent.rng)).tolist(),
             })
             channel.flush()
             round_id += 1
+        if dashboard is not None:
+            dashboard.set_phase('Training complete')
     except BaseException:
+        if dashboard is not None:
+            dashboard.set_phase('Stopped / error; see inference log')
+            logging.exception('Inference stopped')
         # Interrupt reset RPC waits before publishing an abort (which itself may
         # be delayed by a failed transport). Already issued NUC motion cannot be undone.
         for env in envs:
@@ -344,5 +432,9 @@ def run_inference(flags, agent=None, env_factory=None):
             for env in envs:
                 env.close()
         finally:
-            reset_workers.shutdown(wait=True)
-            channel.close()
+            try:
+                reset_workers.shutdown(wait=True)
+                channel.close()
+            finally:
+                if dashboard is not None:
+                    dashboard.close()

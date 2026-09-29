@@ -8,6 +8,7 @@ import argparse
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
 import pickle
 import signal
@@ -196,18 +197,23 @@ def node(args):
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, interrupted)
     def launch(name, command):
-        log = (args.output / f'{name}.log').open('w')
+        suffix = '-rank-' + os.environ.get('EXPO_PROCESS_ID', '0') if args.node_role == 'learner' else ''
+        log = (args.output / f'{name}{suffix}.log').open('w')
         logs.append(log)
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         children.append(process)
         return process
     passed = False
     try:
+        leader = args.node_role == 'inference' or int(os.environ.get('EXPO_PROCESS_ID', '0')) == 0
         transport = launch('transport', [sys.executable, '-u', '-m', 'expo_ft.distributed.transport',
-                                         '--config', args.transport_config])
+                                         '--config', args.transport_config]) if leader else None
         base = [sys.executable, '-u', __file__, '--fixture', str(args.fixture), '--params', str(args.params),
                 '--assets', str(args.assets), '--asset-id', args.asset_id, '--session', args.session,
-                '--rounds', str(args.rounds), '--playback-hz', str(args.playback_hz), '--port', str(args.port), '--mailbox', args.mailbox]
+                '--rounds', str(args.rounds), '--warmup-episodes', str(args.warmup_episodes),
+                '--playback-hz', str(args.playback_hz), '--port', str(args.port), '--mailbox', args.mailbox]
+        if args.performance:
+            base.append('--performance')
         model = launch(args.node_role, base + ['--role', args.node_role, '--output', str(args.output / args.node_role)])
         workload = [model]
         if args.node_role == 'inference':
@@ -216,7 +222,7 @@ def node(args):
                                                                '--output', str(args.output)]))
         deadline = time.monotonic() + 5400
         while any(child.poll() is None for child in workload):
-            if transport.poll() is not None or any(child.poll() not in (None, 0) for child in workload):
+            if (transport is not None and transport.poll() is not None) or any(child.poll() not in (None, 0) for child in workload):
                 raise RuntimeError('test child failed; inspect the role logs')
             if time.monotonic() >= deadline:
                 raise TimeoutError('cross-cluster integration')
@@ -236,10 +242,13 @@ def node(args):
                 child.wait()
         for log in logs:
             log.close()
-        (args.output / 'node-result.json').write_text(json.dumps({'passed': passed, 'role': args.node_role}))
+        (args.output / ('node-result-' + os.environ.get('EXPO_PROCESS_ID', '0') + '.json')).write_text(
+            json.dumps({'passed': passed, 'role': args.node_role}))
 
 
 def model_role(args):
+    import faulthandler
+    faulthandler.register(signal.SIGUSR1, all_threads=False)
     import logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
     import jax
@@ -257,8 +266,15 @@ def model_role(args):
     from expo_ft.data.replay_buffer import create_replay_buffer, _critic_key_to_storage
     from openpi.training import sharding
 
+    from expo_ft.distributed.learner_group import initialize_learner, LearnerGroup, local_value
+    from expo_ft.data.distributed_sampler import DistributedReplaySampler
+    if args.role == 'learner':
+        initialize_learner(SimpleNamespace(split_role='learner', fsdp_devices=1, offline_ratio=0, num_robot=2))
+    group = LearnerGroup()
     assert jax.default_backend() == 'gpu'
-    assert jax.device_count() == (4 if args.role == 'learner' else 1)
+    assert jax.device_count() == (4 * group.size if args.role == 'learner' else 1)
+    if group.size > 1 and not args.performance:
+        raise ValueError('Multi-host WAN test uses --performance; action diagnostics require a local inference cache')
     args.output.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((args.fixture / 'manifest.json').read_text())
     reference = pickle.loads((args.fixture / 'reference.pkl').read_bytes())
@@ -268,7 +284,7 @@ def model_role(args):
     config.pi05_assets_dir, config.pi05_asset_id = str(args.assets), args.asset_id
     flags = SimpleNamespace(config=config, config_task=task, seed=42, replan_steps=8, num_robot=2,
         split_session=args.session, split_mailbox=args.mailbox, split_timeout=1800, resume=False,
-        split_warmup_episodes=10,
+        split_warmup_episodes=args.warmup_episodes,
         client_host='127.0.0.1', client_port=args.port, output_dir=str(args.output), run_name='recorded-wan',
         max_steps=manifest['transitions'], batch_size=64, utd_ratio=20, num_updates=3, step_interval=50,
         checkpoint_model=True, checkpoint_buffer=True, checkpoint_interval=0)
@@ -282,8 +298,38 @@ def model_role(args):
     versions, parameter_hashes = [], []
 
     if args.role == 'inference':
+        from expo_ft.utils import robot_round
+        original_collect = robot_round.collect_round
+        rollout_index = 0
+        def measured_collect(*values, **kwargs):
+            nonlocal rollout_index
+            started = time.monotonic()
+            result = original_collect(*values, **kwargs)
+            with (args.output / 'rollout-timing.jsonl').open('a') as stream:
+                stream.write(json.dumps(dict(round=rollout_index, start=started,
+                                             end=time.monotonic())) + '\n')
+            rollout_index += 1
+            return result
+        robot_round.collect_round = measured_collect
         original = runner.import_policy
         def checked_import(agent, buffer, contract, version):
+            if args.performance:
+                # Initial and first updated policies get exact device-parameter
+                # verification, outside the five subsequent measured cycles.
+                verify = len(versions) < 2
+                expected = channel.receive('validation-policy', str(version)) if verify else None
+                if verify:
+                    channel.release('validation-policy', str(version))
+                    assert parameter_hash(buffer) == expected['parameter_sha256']
+                agent = original(agent, buffer, contract, version)
+                if verify:
+                    with runner.export_policy(agent, contract, version) as installed:
+                        assert parameter_hash(installed) == expected['parameter_sha256']
+                    (args.output / f'installed-{version}.json').write_text(json.dumps({
+                        'version': version, 'installed_parameters_exact': True,
+                        'parameter_sha256': expected['parameter_sha256']}))
+                versions.append(version)
+                return agent
             validation_start = time.monotonic()
             expected = channel.receive('validation-policy', str(version))
             channel.release('validation-policy', str(version))
@@ -327,7 +373,7 @@ def model_role(args):
             return agent
         runner.import_policy = checked_import
         runner.run_inference(flags)
-        assert len(versions) == args.rounds - 10
+        assert len(versions) == args.rounds - args.warmup_episodes
         assert len(set(parameter_hashes)) == len(parameter_hashes)
         (args.output / 'inference-passed.json').write_text(json.dumps({'versions': versions, 'parameter_hashes': parameter_hashes}))
         return
@@ -339,10 +385,34 @@ def model_role(args):
     buffer_args = dict(config=config, example_action=reference['actions'][None],
         capacity=manifest['transitions'] + 1024, task_description=task.language_instruction,
         replan_steps=8, delay=0, critic_camera_keys=CRITIC_CAMERA_KEYS)
-    buffers = [create_replay_buffer(**buffer_args, seed=42+i) for i in range(2)]
+    buffers = [create_replay_buffer(**buffer_args, seed=42+i+100003*jax.process_index()) for i in range(2)]
     offline = create_replay_buffer(**dict(buffer_args, capacity=1), seed=42)
-    processor = BatchProcessor(buffers[0], offline, data, 64, 20, 0, config.actor_success_only, False,
-                               replay_buffers=buffers)
+    sampler = (DistributedReplaySampler(seed=42, global_batch_size=64,
+                rank=jax.process_index(), world_size=group.size) if group.size > 1 else None)
+    if sampler is not None:
+        original_sample = sampler.sample
+        def measured_sample(candidates, **options):
+            result = original_sample(candidates, **options)
+            counts = [int(c) if np.isscalar(c) else len(c) for c in candidates]
+            with (args.output / f'sampling-rank-{jax.process_index()}.jsonl').open('a') as stream:
+                stream.write(json.dumps(dict(**options, counts=counts,
+                    selected=None if result is None else result.tolist())) + '\n')
+            return result
+        sampler.sample = measured_sample
+    processor = BatchProcessor(buffers[0], offline, data, 64 // group.size, 20, 0, config.actor_success_only, False,
+                               replay_buffers=buffers, utd_axis=group.size > 1, distributed_sampler=sampler)
+    original_next_batch = processor.next_batch
+    def measured_next_batch(rng, **sample_options):
+        started = time.monotonic()
+        result = original_next_batch(rng, **sample_options)
+        if not (args.output / f'batch-shapes-rank-{jax.process_index()}.json').exists():
+            summary = jax.tree.map(lambda x: dict(shape=list(x.shape), dtype=str(x.dtype),
+                                                  sharding=str(x.sharding)), result[:2])
+            (args.output / f'batch-shapes-rank-{jax.process_index()}.json').write_text(json.dumps(summary))
+        with (args.output / f'batch-timing-rank-{jax.process_index()}.jsonl').open('a') as stream:
+            stream.write(json.dumps(dict(seconds=time.monotonic()-started)) + '\n')
+        return result
+    processor.next_batch = measured_next_batch
     example = {_critic_key_to_storage(k): buffers[0].dataset_dict[_critic_key_to_storage(k)][:1] for k in CRITIC_CAMERA_KEYS}
     example.update(state=buffers[0].dataset_dict['state'][:1], actions=buffers[0].dataset_dict['actions'][:1])
     obs, state, action = buffers[0].convert_to_critic_format(example)
@@ -383,7 +453,8 @@ def model_role(args):
         for robot, (records, success) in enumerate(episodes):
             expected = manifest['robots'][robot][round_number]
             assert len(records) == expected['length'] and bool(success) == expected['success']
-            assert record_hash(records) == expected['records_sha256'], (robot, round_number)
+            if not args.performance:
+                assert record_hash(records) == expected['records_sha256'], (robot, round_number)
         print('RECORDED_ROUND_VERIFIED', round_number, [len(e[0]) for e in episodes], flush=True)
         round_number += 1
         return episodes
@@ -391,6 +462,13 @@ def model_role(args):
         start = time.monotonic()
         buffer = original_export(agent, contract, version)
         export_seconds = time.monotonic() - start
+        if args.performance:
+            if len(versions) < 2:
+                channel.send('validation-policy', str(version), {'parameter_sha256': parameter_hash(buffer)})
+                channel.flush()
+            versions.append(version)
+            print('EXPORT_TIMING', json.dumps(dict(version=version, seconds=export_seconds)), flush=True)
+            return buffer
         digest = parameter_hash(buffer)
         details = diagnostic_actions(agent.cache_infer_params(), reference['observations'])
         inputs = agent.actor.process_raw_inputs(deepcopy(reference['observations']), agent.action_dim, agent.resize_size)
@@ -407,10 +485,43 @@ def model_role(args):
     runner.receive_round, runner.export_policy = checked_round, checked_export
     agent = runner.run_learner(flags, agent, buffers, processor, manager, args.output / 'checkpoints', save_checkpoint,
                               0, False, replicated, 1)
-    updates = (args.rounds - 10) * 3
+    updates = (args.rounds - args.warmup_episodes) * 3
     restored = restore_checkpoint(manager, agent)
-    assert int(restored.actor_train_state.step) == updates
-    assert int(restored.critic.step) == updates * flags.utd_ratio
+    assert int(local_value(restored.actor_train_state.step)) == updates
+    assert int(local_value(restored.critic.step)) == updates * flags.utd_ratio
+    if sampler is not None:
+        # Compare the next batch after an actual checkpoint restore, including
+        # indexed n-step/image gathering, before any further gradient update.
+        next_step = int(local_value(restored.actor_train_state.step))
+        expected = processor.next_batch(jax.random.PRNGKey(42), update_step=next_step)
+        resumed = BatchProcessor(buffers[0], offline, data, 64 // group.size, 20, 0,
+            config.actor_success_only, False, replay_buffers=buffers, utd_axis=True,
+            distributed_sampler=DistributedReplaySampler(seed=42, global_batch_size=64,
+                rank=jax.process_index(), world_size=group.size))
+        actual = resumed.next_batch(jax.random.PRNGKey(42), update_step=next_step)
+        for a, b in zip(jax.tree.leaves(expected), jax.tree.leaves(actual)):
+            local_a = [s.data for s in a.addressable_shards] if isinstance(a, jax.Array) else [a]
+            local_b = [s.data for s in b.addressable_shards] if isinstance(b, jax.Array) else [b]
+            assert len(local_a) == len(local_b)
+            for x, y in zip(local_a, local_b):
+                np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+        group.barrier('sampling-logs-ready')
+        logs = [[json.loads(line) for line in
+                 (args.output / f'sampling-rank-{rank}.jsonl').read_text().splitlines()]
+                for rank in range(group.size)]
+        assert all(len(rows) == len(logs[0]) for rows in logs)
+        for rows in zip(*logs):
+            for row in rows[1:]:
+                assert {k: v for k, v in row.items() if k != 'selected'} == {
+                    k: v for k, v in rows[0].items() if k != 'selected'}
+            if rows[0]['selected'] is None:
+                assert all(row['selected'] is None for row in rows)
+                continue
+            plan = np.concatenate([np.asarray(row['selected']) for row in rows], axis=1)
+            assert plan.shape == (rows[0]['num_batches'], 64, 2)
+            if sum(rows[0]['counts']) >= 64:
+                assert all(len(set(map(tuple, minibatch))) == 64 for minibatch in plan)
+    round_number = group.call(lambda: round_number)
     assert round_number == args.rounds
     assert len(set(parameter_hashes)) == len(parameter_hashes)
     checkpoint_dir = args.output / 'checkpoints'
@@ -426,10 +537,12 @@ def model_role(args):
             assert all(bool(row['is_success']) == expected['success'] for row in records)
     manager.close()
     wandb.finish()
-    (args.output / 'learner-passed.json').write_text(json.dumps({'rounds': round_number, 'updates': updates,
-        'devices': 4, 'batch_size': 64, 'utd_ratio': 20, 'critic_updates': int(restored.critic.step), 'versions': versions,
+    (args.output / f'learner-passed-rank-{jax.process_index()}.json').write_text(json.dumps({'rounds': round_number, 'updates': updates,
+        'devices': jax.device_count(), 'batch_size': 64, 'utd_ratio': 20, 'critic_updates': int(local_value(restored.critic.step)), 'versions': versions,
         'transitions': manifest['transitions'], 'records_verified': True, 'checkpoint_restore': True,
-        'batch_replay_files': args.rounds * 2, 'batch_replay_verified': True, 'duplicate_round_archives': False}))
+        'batch_replay_files': args.rounds * 2, 'batch_replay_verified': True, 'duplicate_round_archives': False,
+        'distributed_sampling_verified': sampler is not None,
+        'restored_update_sampling_exact': sampler is not None}))
 
 
 if __name__ == '__main__':
@@ -446,6 +559,8 @@ if __name__ == '__main__':
     parser.add_argument('--mailbox')
     parser.add_argument('--session', default='wan-recorded-20260925')
     parser.add_argument('--rounds', type=int, default=12)
+    parser.add_argument('--warmup-episodes', type=int, default=10)
+    parser.add_argument('--performance', action='store_true', help='Check initial and first updated GPU parameters exactly; omit expensive action diagnostics in measured rounds')
     parser.add_argument('--playback-hz', type=int, default=1000,
                         help='Mock playback rate; use 10 for real-time collection cadence')
     parser.add_argument('--robot', type=int)
@@ -453,6 +568,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.playback_hz <= 0:
         parser.error('--playback-hz must be positive')
-    if args.rounds < 12:
-        parser.error('Use at least 12 rounds to update and infer with a replacement policy')
+    if args.rounds < args.warmup_episodes + 2:
+        parser.error('Need warmup plus at least two rounds to update and infer with a replacement policy')
     {'prepare': prepare, 'mock': mock_client, 'node': node}.get(args.role, model_role)(args)

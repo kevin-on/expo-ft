@@ -7,6 +7,30 @@ from typing import Any, List, Optional
 import numpy as np
 
 
+def log_round_interventions(episodes, metrics):
+    """Log only the current online round, including warmup; no replay samples."""
+    human_steps, total_steps = 0, 0
+    intervened, unassisted_successes = 0, 0
+    for robot, (records, success) in enumerate(episodes):
+        human = sum(bool(record.get("is_hil", False)) for record in records)
+        had_intervention = human > 0
+        unassisted_success = bool(success) and not had_intervention
+        human_steps += human
+        total_steps += len(records)
+        intervened += had_intervention
+        unassisted_successes += unassisted_success
+        metrics.update({
+            f"robot-{robot}/intervention_rate": human / len(records) if records else 0.0,
+            f"robot-{robot}/had_intervention": float(had_intervention),
+            f"robot-{robot}/success_without_intervention": float(unassisted_success),
+        })
+    metrics.update({
+        "training/intervention_rate": human_steps / total_steps if total_steps else 0.0,
+        "training/had_intervention": intervened / len(episodes) if episodes else 0.0,
+        "training/success_without_intervention": unassisted_successes / len(episodes) if episodes else 0.0,
+    })
+
+
 @dataclass
 class EpisodeState:
     ep_return: float = 0.0
@@ -54,16 +78,11 @@ class TrainingStats:
     update_count: int = 0
     ep_successes: deque = field(default_factory=lambda: deque(maxlen=10))
     ep_count: int = 0
-    intervention_count: int = 0
-    total_intervention_transitions: int = 0
 
     def on_episode_done(self, ep: EpisodeState, success: bool, metrics: dict):
         self.ep_count += 1
         self.ep_successes.append(float(success))
-        if ep.had_intervention:
-            self.intervention_count += 1
-        self.total_intervention_transitions += ep.human_steps
-
+        had_intervention = ep.human_steps > 0
         total_actions = ep.policy_steps + ep.human_steps
         intervention_rate = float(ep.human_steps) / total_actions if total_actions else 0.0
         metrics.update({
@@ -71,8 +90,8 @@ class TrainingStats:
             "training/length": float(ep.ep_len),
             "training/success": float(success),
             "training/intervention_rate": intervention_rate,
-            "training/episodes_with_intervention": float(self.intervention_count),
-            "training/total_intervention_transitions": float(self.total_intervention_transitions),
+            "training/had_intervention": float(had_intervention),
+            "training/success_without_intervention": float(success and not had_intervention),
         })
 
     def maybe_add_success_rate(self, step: int, metrics: dict):

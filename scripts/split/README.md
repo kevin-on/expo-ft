@@ -12,6 +12,15 @@ ordering and recovery. [Robot configuration](../../docs/multi_robot.md) explains
 mirror, replay and hardware routing. [Test inventory](../../tests/README.md)
 separates regressions from GPU and hardware checks.
 
+**Two-node / eight-GH200 learner:** follow the
+[two-node guide](../../docs/multinode_learner.md) before using this recipe.
+The commands below launch a **one-node** learner. Setting `DELTA_GPUS=8` in
+this profile does not enable two-node execution; that needs one JAX process
+per node, distributed initialization and the fabric/container bindings.
+The two-node changes currently live in the `multi-node-learner` worktree at
+`/scr/kevinon/workspace/expo-ft-multinode`; do not assume the main fork checkout
+or an older prepared source snapshot already contains them.
+
 ## 1. Establish the current state
 
 On WS (lightweight commands only):
@@ -357,18 +366,86 @@ that expanded fixture read-only on both hosts. Original source records were from
 Check available shared fixture directories before an allocation expires; do not
 assume node-local `/tmp` is persistent.
 
+For a two-node/eight-GH200 learner, configure the optional profile fields in
+[the two-node guide](../../docs/multinode_learner.md#real-robot-training-deployment-status).
+The same `run_role.sh learner RUN` launches both ranks; inference stays single-node.
+
 ## 7. Inspect, stop, restart
+
+### Interactive rollout control on ILIAD
+
+To control when each robot starts, set these in the deployed run profile:
+
+```bash
+ROLLOUT_DASHBOARD=true
+ROLLOUT_MODE=manual
+```
+
+Run the usual inference role in an interactive terminal; use `ssh -tt` on
+**each SSH hop**. The launcher supplies `srun --pty`. The two WS robot clients
+still run separately with their existing commands. This feature only changes
+the split inference process and works with either one or two learner nodes.
+
+- `0` / `1`: start the corresponding READY robot.
+- Space: start all READY robots.
+- `m`: switch auto/manual at runtime. Auto immediately releases waiting READY
+  robots; switching to manual leaves running episodes alone.
+- `q`: stop inference through the existing abort path; this does not request
+  a checkpoint. Request a checkpoint separately and wait for its saved message.
+
+The dashboard shows robot status, current step, completed episodes, success
+count/rate, latest result, elapsed time and human-controlled steps. Episode
+totals cover the current inference session. Detailed logs go to `inference.log`.
+In manual mode, new-policy installation and both resets finish before READY;
+the first fresh observation is read only after that robot is started. Reset
+remains automatic. Both episodes must finish before the next learner update.
+Start keys outside READY are ignored rather than queued for future rounds.
+Existing peer timeouts still apply while waiting for manual input.
+
+Without `ROLLOUT_DASHBOARD=true`, the existing automatic rollout stays unchanged.
+
+For a manual checkpoint, run this in a separate terminal on the learner's
+login node (from the deployed repo):
+
+```bash
+bash scripts/request_checkpoint.sh "$DELTA_RUN_ROOT/$RUN/checkpoints"
+```
+
+Pass the existing run's **checkpoint directory**, not a numbered checkpoint.
+Each Enter creates `save.request`. Local multi-robot and split learners check
+it after the current round's updates, save with the existing round ledger,
+wait for completion, remove the request and log `Manual checkpoint saved ...`.
+Requests coalesce while one is pending, including during saving; an interval
+save due at the same boundary is not duplicated. Manual requests work even
+without `--checkpoint_model`; resumable replay still requires
+`--checkpoint_buffer` throughout the run. With two learner nodes, rank 0
+checks the file and both ranks participate in saving. Ctrl+C here exits only
+the request script. This requires the updated learner code; it does not add
+manual saving to an already-running older process.
 
 - Per-run shared logs: `learner.log`, `inference.log`, `transport-ROLE.log`.
   Checkpoints/replay: `DELTA_RUN_ROOT/RUN/checkpoints`.
   Videos are written on WS to `WS_VIDEO_ROOT`, not to ILIAD's filesystem.
+- For the balance0927 seed42 datasets, use W&B group
+  `pick_cube_balance_0927_seed42` across dataset sizes, wrist options and GPU
+  counts. Put those individual experiment differences in the run name/config,
+  rather than creating a separate group for each launch.
+- `robot-N/intervention_step_rate` is the fraction of human-controlled steps in
+  that robot's latest episode; `training/intervention_step_rate` pools both
+  episodes in the latest round (weighted by their step counts).
+  `robot-N/intervention_episode_rate` and `training/intervention_episode_rate`
+  are cumulative fractions of completed episodes with at least one human step.
+  Warmup episodes count; demonstrations do not. Counts survive checkpoint resume;
+  checkpoints predating intervention totals start metric counting anew.
+  The old `intervention_rate` keys remain aliases of the step rates.
 - `split/update_seconds` includes replay batch preparation and GPU completion.
   `through_inference_ready_seconds` spans update end through snapshot export,
   hash/handoff, receive/verify, GPU installation and installed ACK. It excludes
   rollout and does not assert that physical reset has finished.
-- Latest five-cycle median: 47.68s total, 8.07s rollout, 26.27s three updates,
+- Historical one-node five-cycle median (2026-09-27): 47.68s total, 8.07s rollout, 26.27s three updates,
   9.52s update-end→ACK; receive 7.68s, GPU installation 0.21s. Mock execution is
-  not proof of physical reset timing or task success.
+  not proof of physical reset timing or task success. See the two-node guide
+  for the separate 2026-09-28 eight-GPU results and their measurement scope.
 - Stop robot clients first if running, then stop only the two role commands/test
   steps. Their handlers stop their own model/mock/transport children. Keep the
   relay and WS agent for sequential runs on the same hosts/ports.

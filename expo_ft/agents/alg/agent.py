@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 import logging
 
 import etils.epath as epath
+import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
 
@@ -17,21 +18,27 @@ def initialize_checkpoint_dir(
     checkpoint_dir: epath.Path | str, *, keep_period: int | None, overwrite: bool, resume: bool
 ) -> tuple[ocp.CheckpointManager, bool]:
     checkpoint_dir = epath.Path(checkpoint_dir).resolve()
-    resuming = False
-    if checkpoint_dir.exists():
-        if overwrite:
-            checkpoint_dir.rmtree()
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            logging.info(f"Wiped checkpoint directory {checkpoint_dir}")
-        elif resume:
-            resuming = True
-        else:
-            raise FileExistsError(
-                f"Checkpoint directory {checkpoint_dir} already exists. Use --overwrite or --resume "
-                "to indicate how to handle it."
-            )
+    def prepare_directory():
+        resuming = False
+        if checkpoint_dir.exists():
+            if overwrite:
+                checkpoint_dir.rmtree()
+                logging.info(f"Wiped checkpoint directory {checkpoint_dir}")
+            elif resume:
+                resuming = True
+            else:
+                raise FileExistsError(
+                    f"Checkpoint directory {checkpoint_dir} already exists. Use --overwrite or --resume "
+                    "to indicate how to handle it."
+                )
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        return resuming
 
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if jax.process_count() > 1:
+        from expo_ft.distributed.learner_group import LearnerGroup
+        resuming = LearnerGroup().call(prepare_directory)
+    else:
+        resuming = prepare_directory()
     item_handlers = {
         "agent": ocp.PyTreeCheckpointHandler(),
         "params": ocp.PyTreeCheckpointHandler(),

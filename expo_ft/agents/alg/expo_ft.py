@@ -34,6 +34,7 @@ from expo_ft.networks import (
 from expo_ft.networks.encoders import ResNetV2Encoder
 
 from expo_ft.utils.augmentation import make_data_augmentation_fn
+from expo_ft.distributed.learner_group import replicate
 
 import openpi.shared.array_typing as at
 import openpi.training.sharding as _sharding
@@ -430,7 +431,7 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
 
 
         agent = cls(
-            rng=rng,
+            rng=replicate(rng, replicated_sharding),
             actor=actor,
             actor_train_state=actor_train_state,
             target_actor_params=target_actor_params,
@@ -441,15 +442,15 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
             edit_scale=edit_scale,
             edit_action_xyzg=edit_action_xyzg,
             batch_split=batch_split,
-            actor_tau=jax.device_put(actor_tau, replicated_sharding),
+            actor_tau=replicate(actor_tau, replicated_sharding),
             critic=None if inference_only else critic,
             target_critic=target_critic,
             batch_encoder=batch_encoder,
             temp=temp,
-            target_entropy=jax.device_put(target_entropy, replicated_sharding),
-            entropy_scale=jax.device_put(entropy_scale, replicated_sharding),
-            tau=jax.device_put(tau, replicated_sharding),
-            discount=jax.device_put(discount, replicated_sharding),
+            target_entropy=replicate(target_entropy, replicated_sharding),
+            entropy_scale=replicate(entropy_scale, replicated_sharding),
+            tau=replicate(tau, replicated_sharding),
+            discount=replicate(discount, replicated_sharding),
             num_qs=num_qs,
             num_min_qs=num_min_qs,
             data_augmentation_fn=make_data_augmentation_fn(use_full_augmentation),
@@ -909,19 +910,23 @@ class EXPOLearner(AgentLearner, struct.PyTreeNode):
         rng, key2 = jax.random.split(rng)
         batch["image"] = self.data_augmentation_fn(key1, batch["image"])
         batch["next_image"] = self.data_augmentation_fn(key2, batch["next_image"])
-        batch = prepare_critic_batch(batch, self.actor.model_config.action_dim, self.action_dim, self.state_dim, self.action_horizon, self.replan_steps, self.critic_camera_keys)
         new_agent = agent.replace(rng=rng)
-
-        total_bs = batch["actions"].shape[0]
-        assert total_bs % utd_ratio == 0, (
-            f"Batch size ({total_bs}) must be a multiple of utd_ratio ({utd_ratio})"
-        )
-        minibatch_size = total_bs // utd_ratio
-
-        def reshape_minibatch(x):
-            return x.reshape((utd_ratio, minibatch_size) + x.shape[1:])
-
-        minibatches = jax.tree_util.tree_map(reshape_minibatch, batch)
+        prepare = lambda value: prepare_critic_batch(
+            value, self.actor.model_config.action_dim, self.action_dim, self.state_dim,
+            self.action_horizon, self.replan_steps, self.critic_camera_keys)
+        if batch['state'].ndim == 3:
+            # Each host supplies its own B slice of every UTD minibatch. Keep
+            # images in that layout; flattening then resharding moves them across
+            # hosts before the first gradient update.
+            assert batch['state'].shape[0] == utd_ratio
+            minibatches = jax.vmap(prepare)(batch)
+        else:
+            batch = prepare(batch)
+            total_bs = batch['actions'].shape[0]
+            assert total_bs % utd_ratio == 0
+            minibatch_size = total_bs // utd_ratio
+            minibatches = jax.tree.map(
+                lambda x: x.reshape((utd_ratio, minibatch_size) + x.shape[1:]), batch)
 
         def create_minibatch_sharding(x):
             # Create sharding spec: (None, DATA_AXIS, ...)

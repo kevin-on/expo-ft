@@ -465,11 +465,6 @@ class PiReplayBuffer(Dataset):
         if not hasattr(self, "rng"):
             self.rng = jax.random.PRNGKey(self._seed or 42)
 
-        if keys is None:
-            skipped = {_critic_key_to_storage(c) for c in ALL_CAMERA_KEYS} - set(self._gather_storage)
-            skipped |= {k + "_mask" for k in skipped}
-            keys = [k for k in self.dataset_dict.keys() if k not in skipped]
-
         key, rng = jax.random.split(self.rng)
         max_start = len(self) - n_step
         if hil_only:
@@ -496,6 +491,26 @@ class PiReplayBuffer(Dataset):
                 key, (batch_size,), minval=0, maxval=max_start
             )
         self.rng = rng
+
+        return self.sample_by_indices(indices, keys=keys, out=out)
+
+    def sampling_candidates(self, *, hil_only=False, success_only=False):
+        """The same eligible start rows as sample_jax, before random selection."""
+        end = max(0, len(self) - self._replan_steps)
+        key = "hil_chunk" if hil_only else "is_success" if success_only else None
+        return np.flatnonzero(self.dataset_dict[key][:end]) if key else end
+
+    def sample_by_indices(self, indices, *, keys=None, out=None):
+        """Read selected starts using the existing action/n-step/image handling."""
+        indices = np.asarray(indices, dtype=np.int64)
+        if indices.ndim != 1 or np.any(indices < 0) or np.any(indices >= len(self) - self._replan_steps):
+            raise ValueError('Replay indices must be eligible one-dimensional start rows')
+        batch_size = len(indices)
+        n_step = self._replan_steps
+        if keys is None:
+            skipped = {_critic_key_to_storage(c) for c in ALL_CAMERA_KEYS} - set(self._gather_storage)
+            skipped |= {k + "_mask" for k in skipped}
+            keys = [k for k in self.dataset_dict.keys() if k not in skipped]
 
         def gather(role, arr, row_indices):
             return self._gather(role, arr, row_indices, out=None if out is None else out[role])

@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 import queue
+import tempfile
 import threading
 import time
 from types import SimpleNamespace as NS
@@ -95,7 +96,12 @@ class SplitOverlapTests(unittest.TestCase):
 
     def run_pair(self, *, slow_reset=False, fail_reset=False, fail_update=False,
                  num_robot=2, start_step=0, max_steps=24, warmup=10,
-                 checkpoint_buffer=False, fail_save=False):
+                 checkpoint_buffer=False, fail_save=False, manual_save=False,
+                 checkpoint_interval=2000):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        checkpoint_dir = Path(tmp.name)
+        save_request = checkpoint_dir / 'save.request'
         messages = [{}, {}]
         lock = threading.Condition()
         events = []
@@ -199,6 +205,8 @@ class SplitOverlapTests(unittest.TestCase):
                 return self
             def update(self, *args):
                 if self.updates == 0:
+                    if manual_save:
+                        save_request.touch()
                     update_entered.set()
                     if not fail_reset:
                         for event in reset_started:
@@ -262,7 +270,11 @@ class SplitOverlapTests(unittest.TestCase):
             np=NS(asarray=fake_numpy_array, uint32=int, isfinite=lambda x: NS(all=lambda: True)),
             jax=NS(random=NS(PRNGKey=lambda _: Array([1, 2])), device_put=lambda x, _: x,
                    device_get=lambda x: x, block_until_ready=lambda x: x,
-                   tree=NS(leaves=lambda x: list(x.values()))),
+                   tree=NS(leaves=lambda x: list(x.values()),
+                           map=lambda fn, x: {k: fn(v) for k, v in x.items()})),
+            LearnerGroup=lambda: NS(size=1, leader=True, call=lambda fn: fn(), barrier=lambda _: None),
+            local_value=fake_numpy_array,
+            replicate=lambda value, _: value,
             identity=lambda *a: contract, task_contract=lambda *a: None,
             key=lambda *parts: '/'.join(map(str, parts)),
             export_policy=lambda agent, contract, version: nullcontext(NS(version=version, size=0)),
@@ -272,13 +284,14 @@ class SplitOverlapTests(unittest.TestCase):
             wandb=NS(log=lambda *a, **kw: None), EnvClientWrapper=None,
         )
         load_definitions('expo_ft/utils/robot_round.py', ['updates_for_round'], namespace)
+        load_definitions('expo_ft/utils/log_utils.py', ['log_round_interventions'], namespace)
         load_definitions('expo_ft/distributed/runner.py', ['_abort', 'run_learner', 'run_inference'], namespace)
         peers = [Peer(0), Peer(1)]
         namespace['_channel'] = lambda flags: peers[flags.role]
         flags = dict(seed=1, split_session='test', num_robot=num_robot, client_host='', client_port=8102,
                      output_dir='unused', run_name='test', resume=False, max_steps=max_steps,
                      batch_size=1, split_warmup_episodes=warmup, num_updates=3, step_interval=1, utd_ratio=20, replan_steps=8,
-                     checkpoint_buffer=checkpoint_buffer, checkpoint_model=checkpoint_buffer, checkpoint_interval=2000,
+                     checkpoint_buffer=checkpoint_buffer, checkpoint_model=checkpoint_buffer, checkpoint_interval=checkpoint_interval,
                      config_task=NS(example_action=[], control_hz=10))
         learner_flags, inference_flags = NS(role=0, **flags), NS(role=1, **flags)
         learner_agent, inference_agent = Agent(), Agent()
@@ -290,8 +303,9 @@ class SplitOverlapTests(unittest.TestCase):
                 if role == 0:
                     namespace['run_learner'](learner_flags, learner_agent,
                         [NS(insert=lambda _: events.append(('insert',))) for _ in range(num_robot)],
-                        NS(next_batch=lambda rng: ({}, None, rng)), NS(wait_until_finished=lambda: None),
-                        ROOT, lambda *args: events.append(('model_checkpoint', args[-1])),
+                        NS(next_batch=lambda rng: ({}, None, rng)),
+                        NS(wait_until_finished=lambda: events.append(('checkpoint_drained', save_request.is_file()))),
+                        checkpoint_dir, lambda *args: events.append(('model_checkpoint', args[-1])),
                         start_step, False, None, 1 if num_robot == 2 else None)
                 else:
                     namespace['run_inference'](inference_flags, inference_agent,
@@ -317,6 +331,8 @@ class SplitOverlapTests(unittest.TestCase):
             self.assertTrue(closed.is_set())
         else:
             self.assertEqual(failures, [])
+            if manual_save:
+                self.assertFalse(save_request.exists())
             rounds = (max_steps - start_step) // num_robot
             self.assertTrue(all(env.resets == rounds and env.frames == rounds for env in envs))
             if rounds:
@@ -333,6 +349,21 @@ class SplitOverlapTests(unittest.TestCase):
 
     def test_one_warmup_round_then_updates(self):
         self.run_pair(warmup=1, max_steps=6)
+
+    def test_manual_checkpoint_after_updates_without_automatic_saving(self):
+        events = self.run_pair(warmup=1, max_steps=6, manual_save=True)
+        saved = events.index(('model_checkpoint', 4))
+        drained = events.index(('checkpoint_drained', True))
+        self.assertLess(events.index(('update', 3)), saved)
+        self.assertLess(saved, drained)
+        self.assertLess(drained, events.index(('update', 4)))
+        self.assertEqual([e for e in events if e[0] == 'model_checkpoint'], [('model_checkpoint', 4)])
+
+    def test_manual_and_interval_checkpoint_share_one_save(self):
+        events = self.run_pair(warmup=1, max_steps=6, manual_save=True,
+                               checkpoint_buffer=True, checkpoint_interval=4)
+        self.assertEqual([e for e in events if e[0] == 'model_checkpoint'],
+                         [('model_checkpoint', 4), ('model_checkpoint', 6)])
 
     def test_policy_ready_first_still_waits_for_both_resets(self):
         self.run_pair(slow_reset=True)
