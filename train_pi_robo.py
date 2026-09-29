@@ -37,6 +37,7 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 FLAGS = flags.FLAGS
+flags.DEFINE_string("initial_sft_checkpoint", "", "Completed SFT step; only asset relocation on resume.")
 
 flags.DEFINE_string("project_name", "expo-ft", "wandb project name.")
 flags.DEFINE_string("run_name", None, "Optional wandb run name.")
@@ -99,6 +100,8 @@ config_flags.DEFINE_config_file(
 
 def main(_):
     init_logging()
+    from expo_ft.utils.model_config import configure_training
+    model_record = configure_training(FLAGS) if FLAGS.config.model_cls == "EXPOLearner" else None
     if FLAGS.rollout_dashboard or FLAGS.rollout_mode == "manual":
         if FLAGS.split_role != "inference":
             raise ValueError("Rollout dashboard/manual mode is supported on split inference only")
@@ -208,6 +211,7 @@ def main(_):
         resuming, task_description,
     )
 
+    actor.checkpoint_record = model_record
     critic_camera_keys = tuple(getattr(FLAGS.config_task, "critic_camera_keys", CRITIC_CAMERA_KEYS))
     rb_args = dict(
         config=FLAGS.config,

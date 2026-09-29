@@ -86,8 +86,13 @@ config_flags.DEFINE_config_file(
 )
 
 
+flags.DEFINE_string("initial_sft_checkpoint", "", "Initial completed SFT checkpoint")
+
+
 def main(_):
     init_logging()
+    from expo_ft.utils.model_config import configure_training
+    model_record = configure_training(FLAGS) if FLAGS.config.model_cls == "EXPOLearner" else None
     assert FLAGS.offline_ratio >= 0.0 and FLAGS.offline_ratio <= 1.0
     set_compilation_cache_dir(f"async-{FLAGS.config.model_cls}")
 
@@ -172,6 +177,7 @@ def main(_):
         resuming, task_description,
     )
 
+    actor.checkpoint_record = model_record
     critic_camera_keys = tuple(getattr(FLAGS.config_task, "critic_camera_keys", CRITIC_CAMERA_KEYS))
     rb_args = dict(
         config=FLAGS.config,
