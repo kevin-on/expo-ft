@@ -1,6 +1,6 @@
 # RAM checkpoint evaluation
 
-Run from the `remote-checkpoint-eval` source and its matching OpenPI checkout
+Run from the `multi-robot` source and its matching OpenPI checkout
 (the checkpoint-owned config implementation, currently OpenPI `590fa99`).
 This adds an eval export/receiver; it does not change training checkpoint writes.
 Do not merge or substitute the older `checkpoint-config` eval implementation.
@@ -8,20 +8,36 @@ Do not merge or substitute the older `checkpoint-config` eval implementation.
 ## Modes and storage
 
 The server starts with local `--base-params` in **CPU RAM**, no GPU model.
-In receive/save mode a sender reserves the receiver, exports a checkpoint,
+Reception starts **Locked**. Press `R` to allow **one** transfer; press it again
+before a sender connects to withdraw permission. The TUI displays Locked,
+Ready for ONE transfer, Transferring, or Blocked during saving/eval. A sender
+is rejected while locked, before exporting model data. Admission consumes the
+permission: success, failure, cancellation, and timeout all leave reception locked.
+Starting save/eval also clears unused permission. To intentionally replace the
+current RAM checkpoint, press `R` again; this can discard unsaved RAM weights,
+but never deletes an existing disk copy.
+
+When armed, a sender reserves the receiver, exports a checkpoint,
 then transfers a sealed RAM buffer through the existing transport. A failed
 export or validation retains the previous checkpoint. There is no disk payload
 staging and no queue of future checkpoints.
 
-`E` first saves (or verifies an identical existing copy of) the weights and common
-configuration files. Only successful saving permits a separate GPU process to
-start, build a fresh model and warm up. Save failure retains RAM and starts no
-eval. The TUI remains responsive and shows `Saving` during this step; checkpoint
-replacement is blocked continuously from saving through eval shutdown.
-While it exists, offers are rejected (including during loading and shutdown).
+`S` saves (or verifies an identical existing copy of) the weights and common
+configuration files. `E` is disabled until this checkpoint is `Saved`; it never
+saves automatically. After saving, `E` starts a separate GPU process to build a
+fresh model and warm up. Save failure retains RAM and keeps eval disabled.
+The TUI remains responsive during saving; offers are rejected during saving,
+model loading, eval, and shutdown.
+
+Once this RAM checkpoint is `Saved`, subsequent `S` skips disk reads, hash
+comparison and writes. `E` also trusts that saved state without repeating disk
+verification. Every newly accepted checkpoint resets this state, even if its
+destination path is unchanged. This session-local state assumes saved files are
+not externally removed or modified; a fresh server or `Loaded from disk` requires
+`S` to verify the destination before eval.
 `0`, `1`, and Space start a ready robot or both ready robots. They do not queue
 starts while a robot is running/resetting. Esc ends evaluation. The worker closes
-its own robot connections and exits; only then does the receiver allow another
+its own robot connections and exits; only then can `R` allow another
 checkpoint. The process boundary releases the CUDA context and model allocations.
 The CPU base and received checkpoint remain available for reevaluation or saving.
 The existing WS clients must connect to the eval worker's ports; preparing the
@@ -91,6 +107,15 @@ chunk settings in transport configs. Follow [the split operating guide](../scrip
 The new application requires this revision of both transport sidecars (`next`
 and `progress` local operations). Do not attach to sidecars used by a running
 training job. Reusing SSH tunnels does not mean sharing a live training mailbox.
+
+Keep the authentication agent and relay in a separate tmux session (for example,
+`links`) so eval and online FT can reuse them when compute hosts and ports match.
+The RAM transport has a separate lifetime: if either sidecar restarts, the peer
+rejects the changed session epoch. Stop both applications and sidecars, use fresh
+mailbox directories on both sides, then restart them together. Retrying the sender
+command alone does not clear this failure. Launchers that stop their sidecar on
+exit require this procedure even when only the receiver TUI was quit. Preserve the
+SSH relay and agent during this restart.
 
 On both compute machines start a transport with its normal matching config and a
 **fresh private mailbox**. Keep the two sidecars alive across multiple sends:

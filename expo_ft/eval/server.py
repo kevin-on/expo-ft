@@ -26,10 +26,20 @@ class Session:
         self.saved, self.notice, self.request = 'RAM only', 'Waiting for checkpoint', None
         self.error = None
         self.progress = None
+        self.receive_armed = False
+
+    def toggle_receive(self):
+        with self.lock:
+            if self.mode != 'receive': return False
+            self.receive_armed = not self.receive_armed
+            self.notice = ('One transfer allowed; incoming checkpoint replaces current RAM checkpoint'
+                           if self.receive_armed else 'Reception locked')
+            return True
 
     def offer(self, request, timeout):
         with self.lock:
-            if self.mode != 'receive': return False
+            if self.mode != 'receive' or not self.receive_armed: return False
+            self.receive_armed = False
             self.mode, self.request = 'receiving', request
             self.deadline = time.monotonic()+min(max(float(timeout),1),3600)
             self.notice = 'Sender exporting / transferring checkpoint'
@@ -57,15 +67,28 @@ class Session:
             raise
 
     def begin_eval(self):
-        return self.persist(for_eval=True)
+        with self.lock:
+            if self.mode != 'receive' or self.payload is None: return False
+            if self.saved != 'Saved':
+                self.notice = 'Save checkpoint with S before starting eval'
+                return False
+            self.receive_armed = False
+            self.mode, self.notice = 'eval', 'Loading model'
+            return True
 
     def end_eval(self):
         with self.lock:
             self.mode, self.notice = 'receive', 'GPU process exited; checkpoint retained in RAM'
 
-    def persist(self, *, for_eval=False):
+    def persist(self):
         with self.lock:
             if self.mode != 'receive' or self.payload is None: return False
+            self.receive_armed = False
+            if self.saved == 'Saved':
+                # The immutable RAM checkpoint was already persisted in this
+                # session. accept() invalidates this state on every replacement.
+                self.notice = str(location(self.root,self.meta)/'eval/weights.bin')
+                return True
             self.mode, self.saved = 'saving', 'Saving'
         try:
             path = save(self.payload,self.root)
@@ -73,14 +96,13 @@ class Session:
             with self.lock: self.saved, self.notice, self.mode = 'Save failed', str(exc), 'receive'
             return False
         with self.lock:
-            self.saved, self.notice = 'Saved', 'Loading model' if for_eval else str(path)
-            # No receive window between durable save and GPU process startup.
-            self.mode = 'eval' if for_eval else 'receive'
+            self.saved, self.notice, self.mode = 'Saved', str(path), 'receive'
         return True
 
     def snapshot(self):
         with self.lock:
-            return dict(mode=self.mode,meta=self.meta,saved=self.saved,notice=self.notice,progress=self.progress)
+            return dict(mode=self.mode,meta=self.meta,saved=self.saved,notice=self.notice,progress=self.progress,
+                        receive_armed=self.receive_armed)
 
     def close(self):
         if self.payload is not None: self.payload.close();self.payload=None
@@ -94,7 +116,9 @@ def receiver(channel, session, stop):
             if offer:
                 request, data = offer
                 admitted = session.offer(request,data.get('timeout',600))
-                channel.send('eval-admission',request,dict(accepted=admitted,reason='' if admitted else 'Eval server busy: '+session.mode))
+                reason = ('Reception locked: press R on receiver to allow one transfer'
+                          if session.mode == 'receive' else 'Eval server busy: '+session.mode)
+                channel.send('eval-admission',request,dict(accepted=admitted,reason='' if admitted else reason))
                 channel.flush()
             cancel = channel.poll('eval-cancel')
             if cancel:
@@ -146,7 +170,7 @@ def prepare_output(session, options):
 
 class EvalProcess:
     def __init__(self, session, options):
-        if not session.begin_eval(): raise RuntimeError(session.notice if session.saved=='Save failed' else 'Eval is not available')
+        if not session.begin_eval(): raise RuntimeError(session.notice if session.saved!='Saved' else 'Eval is not available')
         self.session, self.process, self.status, self.log, self.sock = session, None, {}, None, None
         child = None
         try:
@@ -195,6 +219,10 @@ def lines(session, worker, episodes):
         result += [f"Run     {m['training_run_id']}",f"Checkpoint {m['checkpoint_path']}    Policy {m['kind']}",
                    f"Storage {s['saved']}",f"Path    {location(session.root,m)/'eval/weights.bin'}"]
     else: result += ['Checkpoint   None']
+    reception = ('Transferring; further offers blocked' if s['mode']=='receiving' else
+                 'Blocked during '+s['mode'] if s['mode']!='receive' else
+                 'Ready for ONE transfer' if s['receive_armed'] else 'Locked')
+    result += [f'Reception {reception}']
     result += ['',s['notice']]
     progress=s['progress']
     if s['mode']=='receiving' and progress and progress['size']:
@@ -209,7 +237,10 @@ def lines(session, worker, episodes):
         result += ['','[0] Start robot 0  [1] Start robot 1  [Space] Start both  [Esc] End eval']
     else:
         gpu = 'Starting eval' if s['mode']=='eval' else 'GPU released'
-        result += ['',f"State   {s['mode']}    {gpu}",'[E] Save & eval  [S] Save  [Q] Quit']
+        action = 'Eval' if s['mode']=='receive' and s['saved']=='Saved' else 'Eval (disabled)'
+        receive_action = ('Receive (disabled)' if s['mode']!='receive' else
+                          'Lock reception' if s['receive_armed'] else 'Allow one receive')
+        result += ['',f"State   {s['mode']}    {gpu}",f'[E] {action}  [S] Save  [R] {receive_action}  [Q] Quit']
     return result
 
 
@@ -238,6 +269,7 @@ def main():
     base=load_base(a.base_params)
     session=Session(base,a.experiments_root)
     if a.weights:
+        session.toggle_receive()
         request=uuid.uuid4().hex;session.offer(request,600);session.accept(request,read_file(a.weights))
         session.saved='Loaded from disk';session.notice=str(a.weights)
     channel=Channel(a.mailbox)
@@ -263,11 +295,17 @@ def main():
                         for r in a.robots:
                             if str(r).encode() in key: worker.command('start',robots=[r])
                 elif b'q' in key or b'\x03' in key or not key: break
+                elif b'r' in key or b'R' in key:
+                    session.toggle_receive()
                 elif b's' in key or b'S' in key:
                     if writer is None or not writer.is_alive():
                         writer=threading.Thread(target=session.persist);writer.start()
                 elif b'e' in key or b'E' in key:
-                    if launch is None: launch=launcher.submit(EvalProcess,session,options)
+                    state=session.snapshot()
+                    if launch is None and state['mode']=='receive' and state['saved']=='Saved':
+                        launch=launcher.submit(EvalProcess,session,options)
+                    elif state['mode']=='receive':
+                        session.notice='Save checkpoint with S before starting eval'
     finally:
         if launch is not None:
             try: worker=launch.result()

@@ -33,6 +33,7 @@ def main():
     stop=threading.Event();thread=threading.Thread(target=receiver,args=(fixture.channels[1],session,stop));thread.start()
     sender=fixture.channels[0];process=None
     try:
+        session.toggle_receive()
         sender.send('eval-offer','real',{'timeout':600});sender.flush()
         assert sender.receive('eval-admission','real')['accepted'];sender.release('eval-admission','real')
         t=time.monotonic()
@@ -40,6 +41,7 @@ def main():
             sender.send_buffer('eval-weights','real',payload)
             assert sender.receive('eval-result','real',timeout=600)['accepted'];sender.release('eval-result','real')
         print('REAL_RAM_TRANSFER_AND_BASE_VERIFY_SECONDS',time.monotonic()-t,flush=True)
+        assert session.persist()
         assert session.begin_eval()
         parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
         # Fake wrapper is injected before the worker imports it. No robot sockets,
