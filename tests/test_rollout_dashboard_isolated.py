@@ -20,6 +20,43 @@ collect_round = namespace['collect_round']
 
 
 class DashboardTests(unittest.TestCase):
+    def test_reset_keys_require_manual_ready_and_do_not_queue(self):
+        ui = Dashboard(2, 80, mode='auto')
+        ui.handle_key(b'r');ui.ready(0, 0)
+        ui.handle_key(b'r')
+        self.assertEqual(ui.states[0]['status'], 'ready')
+        ui.handle_key(b'm');ui.handle_key(b't')
+        self.assertEqual(ui.states[1]['status'], 'resetting')
+        ui.handle_key(b'1');ui.handle_key(b't')
+        self.assertEqual(ui.states[1]['status'], 'resetting')
+        ui.handle_key(b'0');ui.handle_key(b'r')
+        self.assertEqual(ui.states[0]['status'], 'starting')
+
+    def test_manual_reset_blocks_only_its_robot_and_waits_for_start(self):
+        ui = Dashboard(2, 80)
+        ui.ready(0, 0)
+        entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+        calls = []
+        def reset():
+            calls.append(0);entered.set();release.wait(2)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(ui.wait_for_start, 0, stopped, reset)
+            try:
+                ui.handle_key(b'r');self.assertTrue(entered.wait(1))
+                ui.handle_key(b'r');ui.handle_key(b'0')
+                self.assertFalse(future.done())
+                ui.handle_key(b'1');self.assertTrue(ui.wait_for_start(1, stopped))
+                release.set()
+                deadline = time.monotonic()+2
+                with ui.condition:
+                    while ui.states[0]['status'] != 'ready':
+                        self.assertLess(time.monotonic(),deadline)
+                        ui.condition.wait(.02)
+                self.assertFalse(future.done());self.assertEqual(calls,[0])
+                self.assertEqual(ui.states[0]['completed'],0)
+                ui.handle_key(b'0');self.assertTrue(future.result(timeout=1))
+            finally:release.set();stopped.set()
+
     def test_early_keys_ignored_and_mode_changes_do_not_restart_running_robot(self):
         ui = Dashboard(2, 80)
         ui.handle_key(b'0')
@@ -55,12 +92,13 @@ class DashboardTests(unittest.TestCase):
         ui.ready(1, 160)
         self.assertEqual([s['status'] for s in ui.states], ['ready', 'ready'])
 
-    def run_collector(self, abort=False):
+    def run_collector(self, abort=False, reset_first=False, reset_failure=False):
         ui = Dashboard(2, 80)
         ui.ready(0, 0)
         frames = [threading.Event(), threading.Event()]
         done = [threading.Event(), threading.Event()]
         closed = []
+        resets = []
 
         class Env:
             def __init__(self, robot):
@@ -68,6 +106,9 @@ class DashboardTests(unittest.TestCase):
             def start_episode(self):
                 frames[self.robot].set()
                 return {'robot': self.robot}
+            def reset_only(self):
+                resets.append(self.robot)
+                if reset_failure: raise RuntimeError('reset RPC failed')
             def step(self, action):
                 return action, 'policy'
             def get_observation(self):
@@ -82,12 +123,25 @@ class DashboardTests(unittest.TestCase):
             done[robot].set()
 
         with ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(collect_round, [Env(0), Env(1)], lambda obs: [[1.]], 1, 10000,
-                reset_done=True, wait_for_start=ui.wait_for_start, check_session=ui.check,
+            envs = [Env(0), Env(1)]
+            result = pool.submit(collect_round, envs, lambda obs: [[1.]], 1, 10000,
+                reset_done=True, wait_for_start=lambda r, stop: ui.wait_for_start(r, stop, envs[r].reset_only), check_session=ui.check,
                 on_transition=lambda r, s, record: ui.step(r, s + 1, record['is_hil']), on_episode_end=end)
             try:
                 self.assertFalse(frames[0].wait(.03))
                 self.assertFalse(frames[1].is_set())
+                if reset_first:
+                    ui.handle_key(b'r')
+                    if reset_failure:
+                        with self.assertRaisesRegex(RuntimeError, 'reset RPC failed'):result.result(timeout=2)
+                        self.assertEqual(sorted(closed),[0,1])
+                        self.assertFalse(any(event.is_set() for event in frames))
+                        return
+                    deadline=time.monotonic()+2
+                    with ui.condition:
+                        while ui.states[0]['status']!='ready':
+                            self.assertLess(time.monotonic(),deadline);ui.condition.wait(.02)
+                    self.assertEqual(resets,[0]);self.assertFalse(frames[0].is_set())
                 if abort:
                     ui.handle_key(b'q')
                     with self.assertRaisesRegex(RuntimeError, 'stopped'):
@@ -110,6 +164,12 @@ class DashboardTests(unittest.TestCase):
 
     def test_abort_unblocks_waiting_gates_without_motion(self):
         self.run_collector(abort=True)
+
+    def test_reset_before_rollout_does_not_add_transitions_or_episodes(self):
+        self.run_collector(reset_first=True)
+
+    def test_reset_failure_aborts_round_without_starting_episodes(self):
+        self.run_collector(reset_first=True,reset_failure=True)
 
 
 if __name__ == '__main__':

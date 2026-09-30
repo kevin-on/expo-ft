@@ -87,6 +87,19 @@ class RobotEvaluation:
         self.pending = list(self.by_robot.values())
         return True
 
+    def reset_ready(self, robot):
+        """Repeat a selected ready robot's reset without recording an episode."""
+        self.check()
+        self.poll()
+        with self.lock:
+            if (robot not in self.states or self.states[robot]['status'] != 'ready'
+                    or robot not in self.by_robot or not self.by_robot[robot].done()):
+                return False
+            self.states[robot]['status'] = 'resetting'
+            self.by_robot[robot] = self.pool.submit(self.reset, robot)
+            self.pending = list(self.by_robot.values())
+        return True
+
     def plan(self, robot, observation):
         observation = canonical_observation(observation, mirror=robot == 1)
         began = time.monotonic()

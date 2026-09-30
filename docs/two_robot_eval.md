@@ -42,7 +42,10 @@ lock serializes policy/RNG use; the model is not duplicated. This barrier is not
 hard real-time simultaneous-motion guarantee.
 
 Each finished robot resets immediately. The next round again waits for all ready
-and another Space. `q`/Ctrl+C closes this eval's connections; errors do not silently
+and another Space. `r` / `t` repeat reset for READY robot0 / robot1, respectively.
+The selected robot shows resetting, then returns to READY without adding an
+episode or starting rollout; reset/start keys for busy robots are ignored.
+`q`/Ctrl+C closes this eval's connections; errors do not silently
 recreate robot environments. An RPC already executing on WS cannot be recalled.
 The WS client validates camera views and task frequency/episode length/action
 format before constructing the environment. Existing single-client eval retains

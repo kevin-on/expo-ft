@@ -404,10 +404,12 @@ def run_inference(flags, agent=None, env_factory=None):
                 channel.send('episode_end', key(session, round_id, robot), {'version': version, 'length': length, 'success': bool(success)})
                 if dashboard is not None:
                     dashboard.episode_done(robot, success)
+            def wait_for_start(robot, stopped):
+                return dashboard.wait_for_start(robot, stopped, reset=envs[robot].reset_only)
             collect_round(envs, sample, flags.replan_steps, flags.config_task.control_hz,
                           mirror_robot=mirror_robot, on_transition=transition, on_episode_end=end,
                           check_session=check_session, reset_done=True,
-                          **({'wait_for_start': dashboard.wait_for_start} if dashboard is not None else {}))
+                          **({'wait_for_start': wait_for_start} if dashboard is not None else {}))
             if dashboard is not None:
                 dashboard.set_phase('Both episodes done; waiting for learner / replay')
             channel.send('round_finished', key(session, round_id), {

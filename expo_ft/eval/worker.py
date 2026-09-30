@@ -79,6 +79,8 @@ def run(sock, base, payload, options):
                     if not select.select([sock],[],[],.1)[0]: continue
                     message,_ = receive_packet(sock)
                     if message['command']=='stop': break
+                    if message['command']=='reset':
+                        session.reset_ready(message['robot'])
                     if message['command']=='start':
                         selected = message.get('robots',list(states))
                         if all(r in states and states[r]['episodes']<options['episodes'] for r in selected):

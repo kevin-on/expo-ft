@@ -421,6 +421,9 @@ the split inference process and works with either one or two learner nodes.
 
 - `0` / `1`: start the corresponding READY robot.
 - Space: start all READY robots.
+- `r` / `t`: reset robot0 / robot1 again, only when that robot is READY in
+  manual mode. It shows resetting and returns to READY, waiting for a start key.
+  Start/repeated reset keys during reset are ignored. The other robot can continue.
 - `m`: switch auto/manual at runtime. Auto immediately releases waiting READY
   robots; switching to manual leaves running episodes alone.
 - `q`: stop inference through the existing abort path; this does not request
@@ -431,7 +434,9 @@ count/rate, latest result, elapsed time and human-controlled steps. Episode
 totals cover the current inference session. Detailed logs go to `inference.log`.
 In manual mode, new-policy installation and both resets finish before READY;
 the first fresh observation is read only after that robot is started. Reset
-remains automatic. Both episodes must finish before the next learner update.
+remains automatic, with the optional manual retry above. A retry adds no episode
+or transition; the first observation is still read after the start key.
+Both episodes must finish before the next learner update.
 Start keys outside READY are ignored rather than queued for future rounds.
 Existing peer timeouts still apply while waiting for manual input.
 

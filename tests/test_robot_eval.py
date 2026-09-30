@@ -32,6 +32,49 @@ def wait_for(test):
 
 
 class EvalTest(unittest.TestCase):
+    def test_manual_reset_only_ready_robot_and_no_extra_episode(self):
+        entered, release = threading.Event(), threading.Event()
+        class SlowReset(Env):
+            def reset_only(self):
+                super().reset_only()
+                if self.resets == 2:
+                    entered.set();release.wait(3)
+        envs={0:SlowReset(1),1:Env(1)}
+        session=RobotEvaluation(envs,lambda obs:np.zeros((1,7)),replan_steps=1,control_hz=1000,max_steps=1)
+        try:
+            self.assertFalse(session.reset_ready(0))
+            session.prepare();wait_for(session.poll)
+            self.assertFalse(session.reset_ready(2))
+            self.assertTrue(session.reset_ready(0));self.assertTrue(entered.wait(2))
+            self.assertFalse(session.reset_ready(0));self.assertFalse(session.start(1,[0]))
+            self.assertEqual(session.snapshot()[0]['status'],'resetting')
+            # Resetting robot 0 must not block robot 1's rollout.
+            self.assertTrue(session.start(1,[1]));wait_for(lambda:session.by_robot[1].done())
+            self.assertEqual(session.results.get_nowait()['robot'],1)
+            release.set();wait_for(session.poll)
+            self.assertEqual(envs[0].resets,2);self.assertEqual(envs[0].starts,0)
+            self.assertFalse(envs[0].steps);self.assertTrue(session.results.empty())
+            self.assertEqual(session.snapshot()[0]['episodes'],0)
+            self.assertTrue(session.start(1,[0]));wait_for(session.poll)
+            self.assertEqual(session.results.get_nowait()['episode'],1)
+        finally:release.set();session.close()
+
+    def test_manual_reset_error_is_reported_without_rollout(self):
+        class FailedReset(Env):
+            def reset_only(self):
+                super().reset_only()
+                if self.resets > 1: raise RuntimeError('reset RPC failed')
+        env=FailedReset()
+        session=RobotEvaluation({1:env},lambda obs:np.zeros((1,7)),replan_steps=1,control_hz=1000,max_steps=1)
+        try:
+            session.prepare();wait_for(session.poll)
+            self.assertTrue(session.reset_ready(1))
+            wait_for(lambda:session.by_robot[1].done())
+            with self.assertRaisesRegex(RuntimeError,'reset RPC failed'):session.poll()
+            self.assertEqual(session.snapshot()[1]['status'],'error')
+            self.assertTrue(session.results.empty());self.assertEqual(env.starts,0)
+        finally:session.close()
+
     def test_start_gate_mirror_shared_policy_and_results(self):
         envs={0:Env(),1:Env()};observations=[];active=0;peak=0
         def predict(obs):

@@ -26,7 +26,7 @@ def keyboard():
 
 
 def display(session, episodes):
-    lines = ['Policy evaluation | Space: start when ALL ready | q: quit']
+    lines = ['Policy evaluation | Space: start when ALL ready | r/t: reset READY robot0/1 | q: quit']
     for robot, state in session.snapshot().items():
         last = '-' if state['last'] is None else ('SUCCESS' if state['last'] else 'FAIL')
         lines.append(f"robot{robot}: {state['status']:<18} step {state['steps']:3}/{session.max_steps} "
@@ -56,7 +56,9 @@ def drive(session, episodes, stream, fd):
             key = os.read(fd,4096)
             if not key or any(k in key for k in (b'q',b'Q',b'\x03')):
                 return
-            if b' ' in key and ready and number < episodes and session.start(number+1):
+            if b'r' in key or b't' in key:
+                session.reset_ready(0 if b'r' in key else 1)
+            elif b' ' in key and ready and number < episodes and session.start(number+1):
                 number += 1
     finally:
         session.close()

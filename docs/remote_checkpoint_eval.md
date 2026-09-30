@@ -36,7 +36,10 @@ destination path is unchanged. This session-local state assumes saved files are
 not externally removed or modified; a fresh server or `Loaded from disk` requires
 `S` to verify the destination before eval.
 `0`, `1`, and Space start a ready robot or both ready robots. They do not queue
-starts while a robot is running/resetting. Esc ends evaluation. The worker closes
+starts while a robot is running/resetting. During eval, `r` / `t` repeat reset for
+READY robot0 / robot1, returning to READY without starting or recording an episode.
+The other robot can continue; busy robots ignore reset. Outside eval, `R` is still
+the receive-permission key. Esc ends evaluation. The worker closes
 its own robot connections and exits; only then can `R` allow another
 checkpoint. The process boundary releases the CUDA context and model allocations.
 The CPU base and received checkpoint remain available for reevaluation or saving.

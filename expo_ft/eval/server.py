@@ -234,7 +234,7 @@ def lines(session, worker, episodes):
             last='—' if state['last'] is None else 'SUCCESS' if state['last'] else 'FAIL'
             result.append(f"Robot {r}  {state['status']:<18}  {state['steps']:3}/{status['max_steps']} steps"
                           f"   {state['episodes']}/{episodes} episodes   success {state['successes']}   last {last}")
-        result += ['','[0] Start robot 0  [1] Start robot 1  [Space] Start both  [Esc] End eval']
+        result += ['','[0/1] Start robot  [Space] Start both  [r/t] Reset READY robot 0/1  [Esc] End eval']
     else:
         gpu = 'Starting eval' if s['mode']=='eval' else 'GPU released'
         action = 'Eval' if s['mode']=='receive' and s['saved']=='Saved' else 'Eval (disabled)'
@@ -290,6 +290,9 @@ def main():
                 key=os.read(fd,4096)
                 if worker:
                     if b'\x1b' in key or b'q' in key or b'\x03' in key: worker.command('stop')
+                    elif b'r' in key or b't' in key:
+                        robot = 0 if b'r' in key else 1
+                        if robot in a.robots: worker.command('reset',robot=robot)
                     elif b' ' in key: worker.command('start',robots=a.robots)
                     else:
                         for r in a.robots:

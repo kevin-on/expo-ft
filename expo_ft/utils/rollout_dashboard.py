@@ -63,6 +63,13 @@ class RolloutDashboard:
                 self.message = f"Mode: {self.mode}; running episodes continue"
             elif key == b"q":
                 self.quit_requested = True
+            elif key in (b"r", b"t"):
+                robot = 0 if key == b"r" else 1
+                if self.mode == "manual" and robot < len(self.states) and self.states[robot]["status"] == "ready":
+                    self.states[robot]["status"] = "resetting"
+                    self.message = f"Reset robot {robot}; press start after READY"
+                else:
+                    self.message = "Reset ignored: requires a READY robot in manual mode"
             elif key in (b"0", b"1", b" "):
                 robots = range(len(self.states)) if key == b" " else [int(key)]
                 started = []
@@ -73,15 +80,32 @@ class RolloutDashboard:
                 self.message = "Start: " + ", ".join(started) if started else "No READY robot; start ignored"
             self.condition.notify_all()
 
-    def wait_for_start(self, robot, stopped):
-        with self.condition:
-            while not stopped.is_set() and not self.quit_requested:
+    def wait_for_start(self, robot, stopped, reset=None):
+        while not stopped.is_set() and not self.quit_requested:
+            with self.condition:
                 state = self.states[robot]
                 if state["status"] == "starting" or (state["status"] == "ready" and self.mode == "auto"):
                     state.update(status="starting", started=time.monotonic())
                     return True
-                self.condition.wait(.1)
-            return False
+                if state["status"] != "resetting":
+                    self.condition.wait(.1)
+                    continue
+            # This robot's collector owns its RPCs; never hold the UI lock during
+            # motion or allow a start request to race the reset.
+            try:
+                if reset is None:
+                    raise RuntimeError("Manual reset callback is unavailable")
+                reset()
+            except BaseException:
+                with self.condition:
+                    self.states[robot]["status"] = "error"
+                raise
+            with self.condition:
+                if stopped.is_set() or self.quit_requested:
+                    return False
+                self.states[robot]["status"] = "ready"
+                self.condition.notify_all()
+        return False
 
     def step(self, robot, steps, is_hil):
         with self.condition:
@@ -100,7 +124,7 @@ class RolloutDashboard:
     def draw(self):
         with self.condition:
             rows = [f"Online FT | {self.mode.upper()} | Round {self.round} | Policy {self.policy} | {self.phase}",
-                    "0: robot0  1: robot1  Space: start READY robots  m: auto/manual  q: stop",
+                    "0/1: start robot  Space: start READY robots  r/t: reset robot0/1 (manual READY)  m: auto/manual  q: stop",
                     "Robot  Status          Step   Episodes   Success       Last       Seconds  Human"]
             for robot, state in enumerate(self.states):
                 count = state["completed"]
