@@ -28,6 +28,24 @@ class Session:
         self.progress = None
         self.receive_armed = False
 
+    def load_saved(self, path):
+        """Load the startup checkpoint; trust an existing canonical disk copy."""
+        with self.lock:
+            if self.mode != 'receive' or self.payload is not None:
+                raise RuntimeError('Local checkpoint loading requires an empty idle session')
+            self.receive_armed = True
+            request = uuid.uuid4().hex
+            self.offer(request, 600)
+        try:
+            self.accept(request, read_file(path))
+        except BaseException:
+            self.cancel(request, 'Local checkpoint load failed')
+            raise
+        with self.lock:
+            target = location(self.root, self.meta) / 'eval/weights.bin'
+            self.saved = 'Saved' if Path(path).resolve() == target.resolve() else 'Loaded from disk'
+            self.notice = str(path)
+
     def toggle_receive(self):
         with self.lock:
             if self.mode != 'receive': return False
@@ -229,11 +247,13 @@ def lines(session, worker, episodes):
         result += [f"Received {progress['done']/1e9:.2f} / {progress['size']/1e9:.2f} GB"]
     if worker:
         status=worker.status
-        result += [status.get('phase','Loading model'), 'New checkpoint reception disabled', '']
+        result += [status.get('phase','Loading model'), 'New checkpoint reception disabled',
+                   f'Target: {episodes} episodes per robot | Success / completed (%)', '']
         for r,state in status.get('robots',{}).items():
             last='—' if state['last'] is None else 'SUCCESS' if state['last'] else 'FAIL'
+            rate=f"{100*state['successes']/state['episodes']:.1f}%" if state['episodes'] else '—'
             result.append(f"Robot {r}  {state['status']:<18}  {state['steps']:3}/{status['max_steps']} steps"
-                          f"   {state['episodes']}/{episodes} episodes   success {state['successes']}   last {last}")
+                          f"   {state['successes']}/{state['episodes']} ({rate})   last {last}")
         result += ['','[0/1] Start robot  [Space] Start both  [r/t] Reset READY robot 0/1  [Esc] End eval']
     else:
         gpu = 'Starting eval' if s['mode']=='eval' else 'GPU released'
@@ -252,7 +272,7 @@ def main():
     p.add_argument('--experiments-root',type=Path,default=Path('/iliad/u/kevinon/experiments/expo-ft'))
     p.add_argument('--weights',type=Path,help='Start from an already saved weights.bin')
     p.add_argument('--robots',type=int,nargs='+',choices=[0,1],default=[0,1])
-    p.add_argument('--episodes',type=int,default=20)
+    p.add_argument('--episodes',type=int,default=30,help='Default for the episode-count prompt shown before each eval')
     p.add_argument('--seed',type=int,default=42)
     p.add_argument('--host',default='0.0.0.0')
     p.add_argument('--base-port',type=int,default=8202)
@@ -269,12 +289,10 @@ def main():
     base=load_base(a.base_params)
     session=Session(base,a.experiments_root)
     if a.weights:
-        session.toggle_receive()
-        request=uuid.uuid4().hex;session.offer(request,600);session.accept(request,read_file(a.weights))
-        session.saved='Loaded from disk';session.notice=str(a.weights)
+        session.load_saved(a.weights)
     channel=Channel(a.mailbox)
     stop=threading.Event();thread=threading.Thread(target=receiver,args=(channel,session,stop),daemon=True)
-    thread.start();writer=None;worker=None;launch=None
+    thread.start();writer=None;worker=None;launch=None;episode_input=None
     launcher=ThreadPoolExecutor(max_workers=1,thread_name_prefix='eval-start')
     from eval_sft_robots import keyboard
     try:
@@ -285,9 +303,31 @@ def main():
                     except Exception as exc: session.notice=str(exc)
                     launch=None
                 if worker and worker.poll(): worker=None
-                sys.stdout.write('\033[H\033[J'+'\n'.join(lines(session,worker,a.episodes))+'\n');sys.stdout.flush()
+                display=lines(session,worker,options['episodes'])
+                if episode_input is not None:
+                    display += ['',f'Episodes per robot [{options["episodes"]}]: {episode_input}',
+                                '[Enter] Confirm  [Backspace] Edit  [Esc] Cancel']
+                sys.stdout.write('\033[H\033[J'+'\n'.join(display)+'\n');sys.stdout.flush()
                 if not select.select([fd],[],[],.1)[0]: continue
-                key=os.read(fd,4096)
+                key=os.read(fd,1)
+                if episode_input is not None:
+                    if not key or key==b'\x03': break
+                    if key==b'\x1b':
+                        episode_input=None
+                        session.notice='Eval cancelled'
+                    elif key in (b'\r',b'\n'):
+                        episodes=int(episode_input) if episode_input else options['episodes']
+                        if episodes<1:
+                            session.notice='Enter a positive episode count'
+                        else:
+                            options=dict(options,episodes=episodes)
+                            episode_input=None
+                            launch=launcher.submit(EvalProcess,session,dict(options))
+                    elif key in (b'\x7f',b'\x08'):
+                        episode_input=episode_input[:-1]
+                    elif b'0'<=key<=b'9' and len(episode_input)<9:
+                        episode_input+=key.decode('ascii')
+                    continue
                 if worker:
                     if b'\x1b' in key or b'q' in key or b'\x03' in key: worker.command('stop')
                     elif b'r' in key or b't' in key:
@@ -304,11 +344,13 @@ def main():
                     if writer is None or not writer.is_alive():
                         writer=threading.Thread(target=session.persist);writer.start()
                 elif b'e' in key or b'E' in key:
-                    state=session.snapshot()
-                    if launch is None and state['mode']=='receive' and state['saved']=='Saved':
-                        launch=launcher.submit(EvalProcess,session,options)
-                    elif state['mode']=='receive':
-                        session.notice='Save checkpoint with S before starting eval'
+                    with session.lock:
+                        if launch is None and session.mode=='receive' and session.saved=='Saved':
+                            session.receive_armed=False
+                            session.notice='Choose episodes per robot'
+                            episode_input=''
+                        elif session.mode=='receive':
+                            session.notice='Save checkpoint with S before starting eval'
     finally:
         if launch is not None:
             try: worker=launch.result()

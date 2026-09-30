@@ -19,6 +19,32 @@ def payload(step='10', value=1):
 
 
 class EnvelopeTest(unittest.TestCase):
+    def test_canonical_local_weights_enable_eval_without_save_or_comparison(self):
+        with tempfile.TemporaryDirectory() as folder, payload() as b:
+            path=save(b,folder)
+            s=Session(None,folder,validator=lambda *_:None)
+            try:
+                with mock.patch('expo_ft.eval.server.save',side_effect=AssertionError('Unexpected disk comparison')) as write:
+                    s.load_saved(path)
+                    self.assertEqual(s.saved,'Saved')
+                    self.assertFalse(s.snapshot()['receive_armed'])
+                    self.assertTrue(s.begin_eval());s.end_eval()
+                    self.assertTrue(s.persist());write.assert_not_called()
+                self.assertEqual(manifest(s.payload)['metadata']['checkpoint_path'],'sft/run-a/checkpoints/10')
+            finally:s.close()
+
+    def test_external_local_weights_need_copy_to_recorded_destination(self):
+        with tempfile.TemporaryDirectory() as source, tempfile.TemporaryDirectory() as destination, payload() as b:
+            path=save(b,source)
+            s=Session(None,destination,validator=lambda *_:None)
+            try:
+                s.load_saved(path)
+                self.assertEqual(s.saved,'Loaded from disk');self.assertFalse(s.begin_eval())
+                self.assertTrue(s.persist());self.assertTrue(s.begin_eval())
+                self.assertTrue((Path(destination)/'sft/run-a/checkpoints/10/eval/weights.bin').is_file())
+                s.end_eval()
+            finally:s.close()
+
     def test_scalar_and_bfloat16_shapes(self):
         import ml_dtypes
         with pack({'base': {'scalar': np.asarray(3, np.float32),

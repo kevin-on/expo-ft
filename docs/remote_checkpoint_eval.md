@@ -24,8 +24,12 @@ staging and no queue of future checkpoints.
 
 `S` saves (or verifies an identical existing copy of) the weights and common
 configuration files. `E` is disabled until this checkpoint is `Saved`; it never
-saves automatically. After saving, `E` starts a separate GPU process to build a
-fresh model and warm up. Save failure retains RAM and keeps eval disabled.
+saves automatically. After saving, `E` prompts for the episode count **per robot**.
+Type a positive integer and press Enter to start a separate GPU process to build
+a fresh model and warm up. Empty Enter uses the displayed default (initially
+`--episodes`, then the last chosen count); Backspace edits and Esc cancels without
+loading a model. Reception is locked while choosing the count.
+Save failure retains RAM and keeps eval disabled.
 The TUI remains responsive during saving; offers are rejected during saving,
 model loading, eval, and shutdown.
 
@@ -33,8 +37,10 @@ Once this RAM checkpoint is `Saved`, subsequent `S` skips disk reads, hash
 comparison and writes. `E` also trusts that saved state without repeating disk
 verification. Every newly accepted checkpoint resets this state, even if its
 destination path is unchanged. This session-local state assumes saved files are
-not externally removed or modified; a fresh server or `Loaded from disk` requires
-`S` to verify the destination before eval.
+not externally removed or modified. Loading `--weights` directly from its canonical
+`<experiments-root>/<checkpoint_path>/eval/weights.bin` starts as `Saved`, enabling
+`E` immediately without saving or re-reading the file for comparison. A file loaded
+from elsewhere still requires `S` to persist it at the path recorded for eval.
 `0`, `1`, and Space start a ready robot or both ready robots. They do not queue
 starts while a robot is running/resetting. During eval, `r` / `t` repeat reset for
 READY robot0 / robot1, returning to READY without starting or recording an episode.
@@ -48,7 +54,7 @@ receiver does not start them, access cameras, or reset robots.
 
 `S` saves in receive mode, with `RAM only`, `Saving`, `Saved`, or `Save failed`
 and an explicit path. Receipt alone does not imply persistence. `Loaded from disk`
-identifies a local load; a new receipt says `RAM only` until saving verifies or
+identifies a local load from outside its canonical destination; a new receipt says `RAM only` until saving verifies or
 writes its disk copy. Save failures retain RAM. A different checkpoint at an
 existing run/step is rejected, never silently overwritten.
 
@@ -135,7 +141,7 @@ python -m expo_ft.eval.server \
   --base-params /local/pi05_base/params \
   --experiments-root /iliad/u/kevinon/experiments/expo-ft \
   --client-video-dir /scr/kevinon/workspace/expo-ft-fork/data/videos \
-  --robots 0 1 --episodes 20
+  --robots 0 1 --episodes 30
 ```
 
 The optional `--weights /.../eval/weights.bin` loads a saved packet into RAM.
