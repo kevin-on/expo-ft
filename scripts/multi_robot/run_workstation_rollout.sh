@@ -38,9 +38,9 @@ for i in (0,1):
     missing=serials-available
     if i == robot_index and missing:
         raise SystemExit(f'Robot {i}: cameras not AVAILABLE: {sorted(missing)}')
-    if cfg['spacemouse_device_path'] not in space_paths:
+    if i == robot_index and cfg['spacemouse_device_path'] not in space_paths:
         raise SystemExit(f'Robot {i}: configured SpaceMouse path missing')
-print(f'Robot {robot_index}: cameras AVAILABLE; both robot mappings and SpaceMouse enumeration passed')
+print(f'Robot {robot_index}: cameras AVAILABLE; both robot mappings and selected SpaceMouse enumeration passed')
 PY
 exec client/.venv/bin/python -m client.run_client \
  --host "${EXPO_LEARNER_HOST:-iris6.stanford.edu}" --port "$(( ${EXPO_LEARNER_BASE_PORT:-8102} + robot_index ))" \

@@ -11,11 +11,10 @@ def key(session, round_id, *parts):
 
 def task_contract(flags, mirror_robot):
     views = []
-    if mirror_robot is not None:
-        for robot in range(flags.num_robot):
-            path = Path(__file__).resolve().parents[2] / f'configs/robots/robot-{robot}.json'
-            config = json.loads(path.read_text())
-            views.append({k: config[k] for k in ('side_camera_id', 'wrist_camera_id')})
+    for robot in range(flags.num_robot):
+        path = Path(__file__).resolve().parents[2] / f'configs/robots/robot-{robot}.json'
+        config = json.loads(path.read_text())
+        views.append({k: config[k] for k in ('side_camera_id', 'wrist_camera_id')})
     return {'num_robot': flags.num_robot, 'mirror_robot': mirror_robot,
             'replan_steps': flags.replan_steps, 'control_hz': flags.config_task.control_hz,
             'language_instruction': flags.config_task.language_instruction,

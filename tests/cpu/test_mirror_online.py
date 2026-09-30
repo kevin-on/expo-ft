@@ -23,6 +23,11 @@ from test_two_robot_conversion import example_step
 
 class MirrorOnlineTests(unittest.TestCase):
     def test_online_observations_executed_actions_and_human_actions_match_converter(self):
+        for count in (1, 2):
+            with self.subTest(num_robot=count):
+                self.check_collection(count)
+
+    def check_collection(self, count):
         class Env:
             def __init__(self, robot):
                 self.robot = robot
@@ -43,7 +48,7 @@ class MirrorOnlineTests(unittest.TestCase):
             def step(self, command):
                 self.commands.append(np.array(command))
                 executed = np.array(command)
-                human = self.robot == 1 and self.index == 1
+                human = self.index == 1
                 if human:
                     executed = np.array([.1, .2, .3, .4, .5, .6, -1.])
                 else:
@@ -56,14 +61,14 @@ class MirrorOnlineTests(unittest.TestCase):
                 return done, done, float(done), float(not done)
             def close(self):
                 pass
-        envs = [Env(0), Env(1)]
+        envs = [Env(i) for i in range(count)]
         policy_action = np.array([.3, -.2, .1, -.4, .5, -.6, 1.])
         inference_observations = []
         def sample(obs):
             inference_observations.append(copy.deepcopy(obs))
             obs['cartesian_position'][:] = 999  # must not corrupt stored observations
             return np.tile(policy_action, (2, 1))
-        episodes = collect_round(envs, sample, 2, 10000, mirror_robot=1)
+        episodes = collect_round(envs, sample, 2, 10000, mirror_robot=1 if count == 2 else None, canonical_frame=True)
         for robot, (rows, success) in enumerate(episodes):
             assert success and len(rows) == 4
             env = envs[robot]
@@ -74,11 +79,12 @@ class MirrorOnlineTests(unittest.TestCase):
                 for key, value in expected['saved_observation'].items():
                     np.testing.assert_array_equal(row['observations'][key], value)
                 np.testing.assert_allclose(row['actions'], np.r_[expected['action']['cartesian_velocity'], expected['action']['gripper_velocity']])
-                assert row['is_hil'] == (robot == 1 and index == 1)
+                assert row['is_hil'] == (index == 1)
             np.testing.assert_allclose(env.commands[0], policy_action * np.array([1, -1, 1, -1, 1, -1, 1]) if robot else policy_action)
             assert rows[-1]['dones'] and rows[-1]['rewards'] == 1
-        np.testing.assert_array_equal(envs[1].commands[2], np.zeros(7))  # unchanged human-to-policy handoff
-        np.testing.assert_allclose(envs[1].commands[3], envs[1].commands[0])
+        for env in envs:
+            np.testing.assert_array_equal(env.commands[2], np.zeros(7))
+            np.testing.assert_allclose(env.commands[3], env.commands[0])
         # Every policy input is an actual canonical observation, never a physical robot1 pose/image.
         expected_observations = [row['observations'] for rows, _ in episodes for row in rows]
         for observation in inference_observations:

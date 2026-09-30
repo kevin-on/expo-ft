@@ -497,3 +497,15 @@ manual saving to an already-running older process.
   split session; consult [checkpoint semantics](../../docs/split_training.md).
 - If scdt/SSH authentication fails, report it. Do not create alternative relay
   hosts, change firewall rules or forward extra keys as an implicit workaround.
+
+### Single-robot split runs
+
+Set `NUM_ROBOTS=1` in the launch profile on both machines (default: 2). This
+selects robot0 and `configs/robots/robot-0.json`; start only client 0. Multi-host
+learner, manual rollout/reset, intervention metrics, replay batches and checkpoints
+use the same split path. The initial SFT checkpoint owns normalization; changing
+the replay demo subset does not change it. Global batch size and updates per round
+are unchanged, but one round now contains one episode instead of two. Warmup remains
+per robot, and global step/checkpoint intervals count only collected transitions.
+Changing robot count on an existing split checkpoint is not supported: start a
+fresh run from SFT. Camera mappings are checked for single-robot sessions too.

@@ -20,6 +20,33 @@ collect_round = namespace['collect_round']
 
 
 class DashboardTests(unittest.TestCase):
+    def test_single_robot_controls_ignore_robot1(self):
+        ui = Dashboard(1, 80)
+        ui.ready(0, 0)
+        ui.handle_key(b'1'); ui.handle_key(b't')
+        self.assertEqual(ui.states[0]['status'], 'ready')
+        ui.handle_key(b'r')
+        self.assertEqual(ui.states[0]['status'], 'resetting')
+        calls = []
+        def reset():
+            calls.append(0)
+            ui.handle_key(b' ')  # ignored while reset is in progress
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            stopped = threading.Event()
+            future = pool.submit(ui.wait_for_start, 0, stopped, reset)
+            try:
+                deadline = time.monotonic() + 2
+                with ui.condition:
+                    while ui.states[0]['status'] != 'ready':
+                        self.assertLess(time.monotonic(), deadline)
+                        ui.condition.wait(.02)
+                self.assertEqual(calls, [0])
+                self.assertFalse(future.done())
+                ui.handle_key(b' ')
+                self.assertTrue(future.result(timeout=1))
+            finally:
+                stopped.set()
+
     def test_reset_keys_require_manual_ready_and_do_not_queue(self):
         ui = Dashboard(2, 80, mode='auto')
         ui.handle_key(b'r');ui.ready(0, 0)

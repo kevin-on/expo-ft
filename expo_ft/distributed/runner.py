@@ -375,11 +375,9 @@ def run_inference(flags, agent=None, env_factory=None):
             # Only after compatible policy/config verification may robot RPCs be created.
             if not envs:
                 for robot in range(flags.num_robot):
-                    views = {}
-                    if mirror_robot is not None:
-                        path = Path(__file__).resolve().parents[2] / f'configs/robots/robot-{robot}.json'
-                        config = json.loads(path.read_text())
-                        views = {k: config[k] for k in ('side_camera_id', 'wrist_camera_id')}
+                    path = Path(__file__).resolve().parents[2] / f'configs/robots/robot-{robot}.json'
+                    config = json.loads(path.read_text())
+                    views = {k: config[k] for k in ('side_camera_id', 'wrist_camera_id')}
                     request = {'example_action': flags.config_task.example_action, 'env_usage': 'train',
                                'async_video': True,
                                'video_dir': str(Path(flags.output_dir) / flags.run_name / 'train_videos' / f'robot-{robot}'),
@@ -408,10 +406,10 @@ def run_inference(flags, agent=None, env_factory=None):
                 return dashboard.wait_for_start(robot, stopped, reset=envs[robot].reset_only)
             collect_round(envs, sample, flags.replan_steps, flags.config_task.control_hz,
                           mirror_robot=mirror_robot, on_transition=transition, on_episode_end=end,
-                          check_session=check_session, reset_done=True,
+                          check_session=check_session, reset_done=True, canonical_frame=True,
                           **({'wait_for_start': wait_for_start} if dashboard is not None else {}))
             if dashboard is not None:
-                dashboard.set_phase('Both episodes done; waiting for learner / replay')
+                dashboard.set_phase('Round complete; waiting for learner / replay')
             channel.send('round_finished', key(session, round_id), {
                 'version': version, 'inference_rng': np.asarray(jax.device_get(agent.rng)).tolist(),
             })

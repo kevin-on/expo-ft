@@ -246,12 +246,12 @@ def main(_):
         actor_success_only=actor_success_only,
         use_dagger_hil_sampling=use_dagger_hil_sampling,
         dataset=dataset,
-        replay_buffers=replay_buffers if multi_robot else None,
+        replay_buffers=replay_buffers if multi_robot or distributed_sampler is not None else None,
         utd_axis=learner_group.size > 1,
         distributed_sampler=distributed_sampler,
     )
 
-    example_buffer = replay_buffer if multi_robot and FLAGS.offline_ratio == 0 else offline_replay_buffer
+    example_buffer = replay_buffer if FLAGS.offline_ratio == 0 or use_dagger_hil_sampling else offline_replay_buffer
     critic_example = {
         _critic_key_to_storage(k): example_buffer.dataset_dict[_critic_key_to_storage(k)][0][np.newaxis]
         for k in critic_camera_keys

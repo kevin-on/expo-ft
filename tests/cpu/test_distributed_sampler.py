@@ -12,7 +12,7 @@ def sampler(rank=0, world_size=2):
     return DistributedReplaySampler(seed=42, global_batch_size=64, rank=rank, world_size=world_size)
 
 
-@pytest.mark.parametrize('counts', [(20, 80), (20, 44), (0, 70)])
+@pytest.mark.parametrize('counts', [(20, 80), (20, 44), (0, 70), (100,)])
 def test_global_minibatches_are_unique_and_split_exactly(counts):
     args = dict(update_step=17, num_batches=20)
     expected = sampler(world_size=1).sample(counts, **args)
@@ -88,13 +88,14 @@ def test_actual_batches_match_unsplit_reference_and_preserve_order(make_buffer):
         procs[0].next_batch(jax.random.PRNGKey(9))
 
 
-def test_replay_restore_reproduces_sampling_and_data(tmp_path, make_buffer):
-    buffers = [make_buffer(1), make_buffer(2)]
+@pytest.mark.parametrize("num_robot", [1, 2])
+def test_replay_restore_reproduces_sampling_and_data(tmp_path, make_buffer, num_robot):
+    buffers = [make_buffer(i + 1) for i in range(num_robot)]
     records = populate(buffers)
     for robot, rows in enumerate(records):
         save_replay_buffer_batch(tmp_path / f'robot-{robot}', rows, start_step=1 + 120 * robot)
     before = processor(buffers, make_buffer(), 0, 2).next_batch(jax.random.PRNGKey(4), update_step=13)
-    restored = [make_buffer(999), make_buffer(998)]
+    restored = [make_buffer(999 - i) for i in range(num_robot)]
     for robot, buffer in enumerate(restored):
         restore_replay_buffer(tmp_path / f'robot-{robot}', buffer, up_to_step=240)
         buffer.restore_success_marks()
@@ -111,3 +112,27 @@ def test_actor_with_no_successes_returns_none(make_buffer):
         jax.random.PRNGKey(0), update_step=0)
     assert batch['state'].shape == (20, 32, 2)
     assert actor is None
+
+
+def test_single_robot_distributed_batches(make_buffer, monkeypatch):
+    from types import SimpleNamespace
+    from expo_ft.distributed.learner_group import initialize_learner
+    monkeypatch.setenv('EXPO_PROCESS_COUNT', '2')
+    monkeypatch.setenv('EXPO_PROCESS_ID', '0')
+    monkeypatch.setenv('EXPO_COORDINATOR', 'localhost:29451')
+    calls = []
+    monkeypatch.setattr(jax.distributed, 'initialize', lambda **kw: calls.append(kw))
+    initialize_learner(SimpleNamespace(split_role='learner', fsdp_devices=1,
+                                      offline_ratio=0, num_robot=1))
+    assert calls[0]['num_processes'] == 2
+    buffers = [make_buffer()]
+    for i in range(120):
+        buffers[0].insert(transition(0, i, i in (59, 119), success=True))
+    full = processor(buffers, make_buffer(), 0, 1).next_batch(jax.random.PRNGKey(4), update_step=7)
+    parts = [processor(buffers, make_buffer(), rank, 2).next_batch(
+        jax.random.PRNGKey(4), update_step=7) for rank in range(2)]
+    for item, axis in [(0, 1), (1, 0)]:
+        combined = jax.tree.map(lambda a, b: np.concatenate((a, b), axis=axis),
+                                parts[0][item], parts[1][item])
+        for actual, expected in zip(jax.tree.leaves(combined), jax.tree.leaves(full[item])):
+            np.testing.assert_array_equal(actual, expected)

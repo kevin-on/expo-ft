@@ -223,7 +223,8 @@ class SplitOverlapTests(unittest.TestCase):
                 return [self.version], self, {}
 
         def collect(envs, sample, replan, hz, *, mirror_robot, on_transition, on_episode_end,
-                    check_session, reset_done):
+                    check_session, reset_done, canonical_frame):
+            test.assertTrue(canonical_frame)
             test.assertTrue(reset_done)
             test.assertEqual(mirror_robot, 1 if num_robot == 2 else None)
             for env in envs:
@@ -297,6 +298,8 @@ class SplitOverlapTests(unittest.TestCase):
         learner_agent, inference_agent = Agent(), Agent()
         def env_factory(**kwargs):
             test.assertTrue(kwargs['env_creation_request']['async_video'])
+            test.assertEqual(set(kwargs['env_creation_request']['expected_camera_views']),
+                             {'side_camera_id', 'wrist_camera_id'})
             return Env(kwargs['port'] - 8102)
         def run(role):
             try:
@@ -376,6 +379,17 @@ class SplitOverlapTests(unittest.TestCase):
 
     def test_single_robot_split_uses_same_handshake(self):
         self.run_pair(num_robot=1, max_steps=12)
+
+    def test_single_robot_save_and_manual_checkpoint(self):
+        events = self.run_pair(num_robot=1, warmup=1, max_steps=3,
+                               manual_save=True, checkpoint_buffer=True)
+        self.assertEqual([(e[1], e[2], e[3]) for e in events if e[0] == 'saved_batch'],
+                         [(0, 1, 1), (0, 2, 1), (0, 3, 1)])
+        self.assertIn(('model_checkpoint', 3), events)
+
+    def test_single_robot_failure_cleanup(self):
+        self.run_pair(num_robot=1, max_steps=12, fail_update=True)
+        self.run_pair(num_robot=1, max_steps=12, fail_reset=True)
 
     def test_stop_at_existing_step_does_not_create_robots(self):
         self.run_pair(start_step=24, max_steps=24)

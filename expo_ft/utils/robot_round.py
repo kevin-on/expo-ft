@@ -13,12 +13,14 @@ from expo_ft.env.sft_eval import canonical_observation, physical_action
 
 def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=None,
                   on_transition=None, on_episode_end=None, check_session=None, *, reset_done=False,
-                  wait_for_start=None):
+                  wait_for_start=None, canonical_frame=False):
     """Return episodes in robot order. No reset or inference survives this barrier.
 
     Workers perform RPCs concurrently and submit inference requests to one queue.
     The caller alone touches the policy, including its RNG. On failure, close all
     connections to interrupt pending RPCs, and discard the incomplete round.
+    canonical_frame=True also normalizes unmirrored single-robot observations
+    and validates executed Cartesian actions, just as for robot0 in a paired round.
     An optional session check also runs while workers wait for WS/reset replies.
     With reset_done=True the caller has joined deferred resets; capture a fresh
     first observation without resetting again or running termination detection.
@@ -38,7 +40,7 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
     def collect(index, env):
         if stopped.is_set():
             return None
-        canonical = mirror_robot is not None
+        canonical = canonical_frame or mirror_robot is not None
         mirror = index == mirror_robot
         if wait_for_start is not None and not wait_for_start(index, stopped):
             return None

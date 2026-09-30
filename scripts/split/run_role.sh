@@ -156,7 +156,7 @@ done
 [[ -f "$LOCAL/mailbox/transport-ready.json" ]] || { echo 'Transport startup timeout' >&2; exit 1; }
 fi
 ARGS=(--config=configs/model/expo_ft_pi_config.py --config_task=configs/task/pick.py
-    --initial_sft_checkpoint=/checkpoint --num_robot=2 --replan_steps=8 --delay=0 --update_type=episode
+    --initial_sft_checkpoint=/checkpoint --num_robot="${NUM_ROBOTS:-2}" --replan_steps=8 --delay=0 --update_type=episode
     --split_session="$SESSION" --split_mailbox=/mailbox --seed=42 --run_name="$RUN" --split_role="$ROLE")
 if [[ "$ROLE" == learner ]]; then
     if [[ "$RANK" == 0 ]]; then

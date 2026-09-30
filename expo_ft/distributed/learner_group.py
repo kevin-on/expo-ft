@@ -19,8 +19,8 @@ def initialize_learner(flags):
         return
     if flags.split_role != 'learner' or flags.fsdp_devices != 1:
         raise ValueError('Multi-host execution requires split learner and fsdp_devices=1')
-    if flags.offline_ratio != 0 or flags.num_robot != 2:
-        raise ValueError('Multi-host learner currently supports two robots and offline_ratio=0 (demo-seeded replay)')
+    if flags.offline_ratio != 0 or flags.num_robot not in (1, 2):
+        raise ValueError('Multi-host learner supports one or two robots and offline_ratio=0 (demo-seeded replay)')
     jax.distributed.initialize(
         coordinator_address=os.environ['EXPO_COORDINATOR'], num_processes=count,
         process_id=int(os.environ['EXPO_PROCESS_ID']),
