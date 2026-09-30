@@ -199,6 +199,30 @@ class Channel:
         with self.receive_buffer(topic, key, timeout, check=check) as buffer, buffer.view() as view:
             return decode(view)
 
+    def progress(self, topic, key):
+        result, _ = self._rpc('progress', id=message_id(topic, key))
+        return result
+
+    def poll_buffer(self, topic, key):
+        result, fd = self._rpc('receive', id=message_id(topic, key))
+        if not result['ready']:
+            return None
+        buffer = Buffer.from_fd(fd)
+        buffer.timings = result['meta'].get('timings', {})
+        return buffer
+
+    def poll(self, topic):
+        """Take one small control message, without imposing a producer sequence."""
+        result, fd = self._rpc('next', topic=topic)
+        if not result['ready']:
+            return None
+        try:
+            with Buffer.from_fd(fd) as buffer, buffer.view() as view:
+                value = decode(view)
+        finally:
+            self.release(topic, result['meta']['key'])
+        return result['meta']['key'], value
+
     def release(self, topic, key):
         """Release receiver pages after consumption; retain a small RAM receipt."""
         self._rpc('release', id=message_id(topic, key))

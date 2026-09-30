@@ -52,6 +52,13 @@ PYTHONPATH=/scr/kevinon/tmp/expo-hil-test-deps OPENBLAS_NUM_THREADS=1 OMP_NUM_TH
 
 ## Reusable integration / measurement tools
 
+- `test_remote_eval.py` and `test_robot_eval.py`: RAM envelope persistence,
+  receive/eval exclusion, transport admission and independent robot starts.
+- `gpu/remote_eval.py`: separate full-checkpoint and RAM-only GPU inference
+  comparisons. `gpu/remote_eval_lifecycle.py` uses an actual payload and disposable
+  GPU worker with fake robot clients to verify receive/eval/save transitions.
+  See [remote eval](../docs/remote_checkpoint_eval.md).
+
 - `gpu/learner_smoke.py`: a recorded HDF5 episode, real inference/updates and
   an independent-process checkpoint restore on one learner deployment.
 - `gpu/split_smoke.py`: two model/transport processes on one allocated test node;

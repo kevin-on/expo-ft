@@ -377,6 +377,9 @@ training dataset or EXPO model overrides.
 Use `both`, `0`, or `1` on both launchers. The GPU terminal owns the Space start
 gate and progress dashboard. See [two-robot evaluation](docs/two_robot_eval.md).
 
+For RAM-to-RAM eval checkpoint transfer, a reusable receiver and explicit weight
+saving, see [remote checkpoint evaluation](docs/remote_checkpoint_eval.md).
+
 ```bash
 # Allocated GPU/container shell, in the prepared learner environment.
 export SFT_CHECKPOINT=/path/to/completed/run/3889

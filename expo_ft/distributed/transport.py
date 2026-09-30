@@ -507,6 +507,24 @@ class Transport:
                     else:
                         send_packet(sock, dict(epoch=self.epoch, ready=True, meta=self.store.received[ident]),
                                     self.store.incoming[ident]['buffer'].fd)
+                elif op == 'progress':
+                    entry = self.store.incoming.get(ident)
+                    if entry is None:
+                        send_packet(sock, {'epoch': self.epoch, 'size': 0, 'done': 0})
+                    else:
+                        size = entry['meta']['size']
+                        done = sum(min(entry['stride'], size-i*entry['stride']) for i in entry['done'])
+                        send_packet(sock, dict(epoch=self.epoch, size=size, done=done,
+                                              elapsed=time.monotonic()-entry['started']))
+                elif op == 'next':
+                    rows = [m for ident, m in self.store.received.items()
+                            if ident in self.store.incoming and m['topic'] == request['topic']]
+                    if not rows:
+                        send_packet(sock, {'epoch': self.epoch, 'ready': False})
+                    else:
+                        meta = min(rows, key=lambda m: m['created'])
+                        send_packet(sock, dict(epoch=self.epoch, ready=True, meta=meta),
+                                    self.store.incoming[meta['id']]['buffer'].fd)
                 elif op == 'release':
                     self.store.release(ident)
                     send_packet(sock, {'epoch': self.epoch, 'ok': True})

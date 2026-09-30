@@ -58,6 +58,17 @@ class EvalTest(unittest.TestCase):
         finally:session.close()
         self.assertTrue(all(e.closed for e in envs.values()))
 
+    def test_start_one_robot_leaves_other_ready(self):
+        envs={0:Env(1),1:Env(1)}
+        session=RobotEvaluation(envs,lambda obs:np.zeros((1,7)),replan_steps=1,control_hz=1000,max_steps=1)
+        try:
+            session.prepare();wait_for(session.poll)
+            self.assertTrue(session.start({0:1},[0]));wait_for(session.poll)
+            self.assertEqual(envs[0].starts,1);self.assertEqual(envs[1].starts,0)
+            self.assertTrue(session.start({1:1},[1]));wait_for(session.poll)
+            self.assertEqual(envs[0].starts,1);self.assertEqual(envs[1].starts,1)
+        finally:session.close()
+
     def test_first_actions_wait_for_both_plans(self):
         envs={0:Env(1),1:Env(1)};release=threading.Event();second=threading.Event();calls=0
         def predict(obs):
