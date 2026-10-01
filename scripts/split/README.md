@@ -528,8 +528,16 @@ at the existing round barrier; rollout does not overlap gradient updates.
 
 There is no relay, transport sidecar or `--split_mailbox`. Transition/control
 messages stay in an in-process mailbox, preserving the split message ordering
-and record ownership. This also preserves the **one-host split sampling behavior**;
-it does not enable the separate multi-host sampler or change the update budget.
+and record ownership. All split/colocated updates sample after round insertion,
+with replacement; there is no batch prefetch across rounds. This does not enable
+multi-host execution or change the per-round update budget. Warmup includes the
+just-completed round, so warmup 10 updates after episode 10, subject to the batch
+size gate. The legacy `local` loop is unchanged.
+
+The TUI shows total/per-robot online transitions and restores episode/success
+totals on resume from the learner checkpoint. Demos and control-only handoff
+polls are excluded from these transition counters. Old checkpoints rebuild TUI
+totals during replay restore; new checkpoints store them in the split ledger.
 
 Inside the matching training environment on the allocated GPU host, for example:
 

@@ -175,7 +175,7 @@ class SplitOverlapTests(unittest.TestCase):
                 if self.resets > 1:
                     permission = ('send', 0, 'prepare_reset', 'test/' + str(self.resets - 1))
                     test.assertIn(permission, events)
-                if self.resets == warmup + 2:
+                if self.resets == max(1, warmup) + 1:
                     reset_started[self.index].set()
                     if fail_reset and self.index == 0:
                         raise RuntimeError('reset failed')
@@ -224,7 +224,8 @@ class SplitOverlapTests(unittest.TestCase):
                 return [self.version], self, {}
 
         def collect(envs, sample, replan, hz, *, mirror_robot, on_transition, on_episode_end,
-                    check_session, reset_done, canonical_frame):
+                    check_session, reset_done, canonical_frame, mark_handoff):
+            test.assertTrue(mark_handoff)
             test.assertTrue(canonical_frame)
             test.assertTrue(reset_done)
             test.assertEqual(mirror_robot, 1 if num_robot == 2 else None)
@@ -286,6 +287,8 @@ class SplitOverlapTests(unittest.TestCase):
             wandb=NS(log=lambda *a, **kw: None), EnvClientWrapper=None,
         )
         load_definitions('expo_ft/utils/robot_round.py', ['updates_for_round'], namespace)
+        load_definitions('expo_ft/distributed/protocol.py', ['training_round'], namespace)
+        namespace['RolloutProgress'] = runpy.run_path(str(ROOT / 'expo_ft/utils/rollout_dashboard.py'))['RolloutProgress']
         load_definitions('expo_ft/utils/log_utils.py', ['log_round_interventions'], namespace)
         load_definitions('expo_ft/distributed/runner.py', ['_abort', 'run_learner', 'run_inference'], namespace)
         peers = [Peer(0), Peer(1)]
@@ -356,7 +359,7 @@ class SplitOverlapTests(unittest.TestCase):
         elif fail_update or fail_reset:
             self.assertTrue(failures)
             self.assertTrue(any(str(e) == ('reset failed' if fail_reset else 'update failed') for e in failures), failures)
-            self.assertTrue(all(env.frames == warmup + 1 for env in envs))
+            self.assertTrue(all(env.frames == max(1, warmup) for env in envs))
             self.assertTrue(closed.is_set())
         else:
             self.assertEqual(failures, [])
@@ -365,10 +368,10 @@ class SplitOverlapTests(unittest.TestCase):
             rounds = (max_steps - start_step) // num_robot
             self.assertTrue(all(env.resets == rounds and env.frames == rounds for env in envs))
             if rounds:
-                self.assertEqual(learner_agent.updates, 6)
+                self.assertEqual(learner_agent.updates, max(0, rounds - max(1, warmup) + 1) * 3)
                 samples = [e for e in events if e[0] == 'sample']
-                self.assertTrue(all(e[2] == start_step for e in samples if e[1] <= warmup + 1))
-                self.assertTrue(all(e[2] == (warmup + 1) * num_robot + start_step for e in samples if e[1] == warmup + 2))
+                self.assertTrue(all(e[2] == start_step for e in samples if e[1] <= max(1, warmup)))
+                self.assertTrue(all(e[2] == max(1, warmup) * num_robot + start_step for e in samples if e[1] == max(1, warmup) + 1))
             else:
                 self.assertEqual(envs, [])
         return events
@@ -379,20 +382,23 @@ class SplitOverlapTests(unittest.TestCase):
     def test_one_warmup_round_then_updates(self):
         self.run_pair(warmup=1, max_steps=6)
 
+    def test_zero_warmup_updates_after_first_round(self):
+        self.run_pair(warmup=0, max_steps=6)
+
     def test_manual_checkpoint_after_updates_without_automatic_saving(self):
         events = self.run_pair(warmup=1, max_steps=6, manual_save=True)
-        saved = events.index(('model_checkpoint', 4))
+        saved = events.index(('model_checkpoint', 2))
         drained = events.index(('checkpoint_drained', True))
         self.assertLess(events.index(('update', 3)), saved)
         self.assertLess(saved, drained)
         self.assertLess(drained, events.index(('update', 4)))
-        self.assertEqual([e for e in events if e[0] == 'model_checkpoint'], [('model_checkpoint', 4)])
+        self.assertEqual([e for e in events if e[0] == 'model_checkpoint'], [('model_checkpoint', 2)])
 
     def test_manual_and_interval_checkpoint_share_one_save(self):
         events = self.run_pair(warmup=1, max_steps=6, manual_save=True,
-                               checkpoint_buffer=True, checkpoint_interval=4)
+                               checkpoint_buffer=True, checkpoint_interval=2)
         self.assertEqual([e for e in events if e[0] == 'model_checkpoint'],
-                         [('model_checkpoint', 4), ('model_checkpoint', 6)])
+                         [('model_checkpoint', 2), ('model_checkpoint', 4), ('model_checkpoint', 6)])
 
     def test_policy_ready_first_still_waits_for_both_resets(self):
         self.run_pair(slow_reset=True)

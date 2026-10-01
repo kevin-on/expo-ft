@@ -57,14 +57,21 @@ inference application's existing WS listener is a separate connection.
    With `checkpoint_buffer`, it durably writes one batch pickle per robot episode,
    then releases the received buffers and inserts records into replay in the
    existing robot order. Partial rounds never enter replay or training.
-6. Existing warmup and update rules are retained: the current multi-robot loop
-   waits for 10 completed rounds before an update-capable round; `num_updates=3`
+6. Warmup counts the current completed round: with `split_warmup_episodes=10`,
+   updates first run after round 10 has been inserted (subject to the batch-size
+   gate). Every batch is sampled after insertion, with replacement, for both
+   colocated and remote split, one/two robots and one/two learner hosts. `num_updates=3`
    means three calls **per round**, with each call's UTD unchanged. Zero derives
    calls from collected transition count / `step_interval`. The stop count is
    also transitions across robots, and the final round can exceed it.
+   Human-to-policy handoff polls are validated/transferred but omitted from replay
+   and transition counters. A terminal poll closes the preceding retained action.
 7. A new version is sent after updates, then installed before the next round.
    Warmup rounds reuse the installed version. Inference uses its own RNG stream;
    its barrier RNG state is included in the learner checkpoint ledger.
+   The ledger also stores per-robot episode/success/transition totals for the TUI;
+   resumed admission restores them and the completed-round count. Older ledgers
+   reconstruct these totals from replay while loading it.
 
 ### Reset during learner updates
 

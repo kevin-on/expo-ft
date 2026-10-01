@@ -8,10 +8,13 @@ import threading
 import time
 from types import SimpleNamespace as NS
 import unittest
+from contextlib import redirect_stdout
+import io
 
 from test_split_reset_overlap_isolated import ROOT, load_definitions
 
 Dashboard = runpy.run_path(str(ROOT / 'expo_ft/utils/rollout_dashboard.py'))['RolloutDashboard']
+Progress = runpy.run_path(str(ROOT / 'expo_ft/utils/rollout_dashboard.py'))['RolloutProgress']
 namespace = dict(deque=deque, Future=Future, ThreadPoolExecutor=ThreadPoolExecutor,
                  deepcopy=deepcopy, queue=queue, threading=threading, time=time,
                  np=NS(asarray=lambda x: x))
@@ -20,6 +23,40 @@ collect_round = namespace['collect_round']
 
 
 class DashboardTests(unittest.TestCase):
+    def test_resume_totals_continue_without_double_counting_or_counting_handoff(self):
+        for robots in (1, 2):
+            progress = Progress(robots)
+            for robot in range(robots):
+                for success in (True, False, True):
+                    progress.record(robot, dict(dones=False))
+                    progress.record(robot, dict(dones=True, is_success=success))
+            restored = Progress(robots, progress.snapshot())
+            ui = Dashboard(robots, 80, mode='auto')
+            ui.restore_progress(restored.snapshot(), 6 * robots)
+            ui.ready(3, 6 * robots)
+            for robot in range(robots):
+                self.assertTrue(ui.wait_for_start(robot, threading.Event()))
+                ui.step(robot, 1, True)
+                ui.step(robot, 2, False, trainable=False)
+                ui.step(robot, 3, False)
+                ui.episode_done(robot, True)
+                self.assertEqual(ui.states[robot]['completed'], 4)
+                self.assertEqual(ui.states[robot]['successes'], 3)
+                self.assertEqual(ui.states[robot]['transitions'], 8)
+                self.assertEqual(ui.states[robot]['steps'], 3)
+                restored.record(robot, dict(dones=False))
+                restored.record(robot, dict(dones=True, is_success=True))
+            self.assertEqual(ui.total_transitions, 8 * robots)
+            ui.restore_progress(restored.snapshot(), 8 * robots)
+            ui.ready(4, 8 * robots)
+            self.assertEqual(ui.total_transitions, 8 * robots)
+            self.assertEqual(ui.round, 5)
+            text = io.StringIO()
+            with redirect_stdout(text):
+                ui.draw()
+            self.assertIn('Total transitions: {}'.format(8 * robots), text.getvalue())
+            self.assertTrue(all(s['completed'] == 4 and s['successes'] == 3 for s in ui.states))
+
     def test_single_robot_controls_ignore_robot1(self):
         ui = Dashboard(1, 80)
         ui.ready(0, 0)

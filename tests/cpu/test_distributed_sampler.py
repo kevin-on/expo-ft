@@ -13,15 +13,16 @@ def sampler(rank=0, world_size=2):
 
 
 @pytest.mark.parametrize('counts', [(20, 80), (20, 44), (0, 70), (100,)])
-def test_global_minibatches_are_unique_and_split_exactly(counts):
+def test_global_minibatches_use_replacement_and_split_exactly(counts):
     args = dict(update_step=17, num_batches=20)
     expected = sampler(world_size=1).sample(counts, **args)
     halves = [sampler(rank).sample(counts, **args) for rank in range(2)]
     actual = np.concatenate(halves, axis=1)
     np.testing.assert_array_equal(actual, expected)
     assert actual.shape == (20, 64, 2)
-    for row in actual:
-        assert len({tuple(pair) for pair in row}) == 64
+    # With fixed seed and these pool sizes, replacement produces repeated rows
+    # even when enough distinct candidates exist for the whole global batch.
+    assert any(len({tuple(pair) for pair in row}) < 64 for row in actual)
     # There need not be 20*64 distinct candidates: each minibatch is independent.
     assert len({tuple(pair) for pair in actual.reshape(-1, 2)}) < 20 * 64
 
@@ -112,6 +113,45 @@ def test_actor_with_no_successes_returns_none(make_buffer):
         jax.random.PRNGKey(0), update_step=0)
     assert batch['state'].shape == (20, 32, 2)
     assert actor is None
+
+
+@pytest.mark.parametrize('num_robot', [1, 2])
+@pytest.mark.parametrize('world_size', [1, 2])
+@pytest.mark.parametrize('offline_ratio', [0, .5, 1])
+def test_split_batches_are_sampled_only_after_round_insertion(make_buffer, monkeypatch,
+                                                            num_robot, world_size, offline_ratio):
+    if world_size > 1 and offline_ratio:
+        pytest.skip('Multi-host offline_ratio > 0 is explicitly unsupported')
+    buffers = [make_buffer(i + 1) for i in range(num_robot)]
+    offline = make_buffer(99)
+    populate(buffers)
+    for i in range(80):
+        offline.insert(transition(9, i, i == 79, success=True))
+    calls = []
+    for index, buffer in enumerate(buffers + [offline]):
+        method = 'sample_by_indices' if world_size > 1 else 'sample_jax'
+        original = getattr(buffer, method)
+        def sample(*args, _index=index, _original=original, **kwargs):
+            calls.append((_index, tuple(len(b) for b in buffers)))
+            return _original(*args, **kwargs)
+        monkeypatch.setattr(buffer, method, sample)
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()), ('batch',))
+    data = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('batch'))
+    proc = BatchProcessor(buffers[0], offline, data, 64 // world_size, 2, offline_ratio,
+                          True, False, replay_buffers=buffers, sample_on_demand=True,
+                          utd_axis=world_size > 1,
+                          distributed_sampler=sampler(0, world_size) if world_size > 1 else None)
+    assert calls == []
+    for round_id in range(2):
+        for robot, buffer in enumerate(buffers):
+            buffer.insert(transition(robot, 120 + round_id, True, success=True))
+        for update in range(3):
+            calls.clear()
+            proc.next_batch(jax.random.PRNGKey(0), update_step=3 * round_id + update)
+            # Critic + success-only actor sample once per participating buffer;
+            # no additional batches get prefetched for a future round.
+            assert calls and all(lengths == (121 + round_id,) * num_robot for _, lengths in calls)
+            assert all(sum(i == index for i, _ in calls) <= 2 for index in range(num_robot + 1))
 
 
 def test_single_robot_distributed_batches(make_buffer, monkeypatch):

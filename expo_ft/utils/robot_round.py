@@ -13,7 +13,7 @@ from expo_ft.env.sft_eval import canonical_observation, physical_action
 
 def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=None,
                   on_transition=None, on_episode_end=None, check_session=None, *, reset_done=False,
-                  wait_for_start=None, canonical_frame=False):
+                  wait_for_start=None, canonical_frame=False, mark_handoff=False):
     """Return episodes in robot order. No reset or inference survives this barrier.
 
     Workers perform RPCs concurrently and submit inference requests to one queue.
@@ -26,6 +26,8 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
     first observation without resetting again or running termination detection.
     An optional start gate runs before reading that observation, independently
     for each robot. Waiting workers do not block the other robot's inference.
+    mark_handoff tags the human-to-policy zero poll for split replay filtering;
+    it remains in the control stream, including terminal information.
     """
     requests = queue.Queue()
     stopped = threading.Event()
@@ -71,7 +73,8 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
                     return None
             # While human control is active, poll the override with the existing
             # zero command. Resume inference after a step returns policy control.
-            command = plan.popleft() if plan else np.zeros_like(action)
+            has_action = bool(plan)
+            command = plan.popleft() if has_action else np.zeros_like(action)
             last_dispatch = time.monotonic()
             if canonical:
                 command = physical_action(command, mirror)
@@ -90,6 +93,8 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
                 observations=observation, actions=action, rewards=reward,
                 masks=mask, dones=done, is_hil=action_type == "human",
             ))
+            if mark_handoff and not has_action and action_type != "human":
+                transitions[-1]['is_handoff'] = True
             if on_transition is not None:
                 on_transition(index, len(transitions) - 1, transitions[-1])
             observation = next_observation

@@ -76,9 +76,26 @@ robot0's buffer once; they are not duplicated into every robot buffer. A positiv
 offline ratio uses the configured separate offline/online batch mixture.
 Success-only actor sampling and the existing EXPO objectives remain unchanged.
 
+Split and colocated mode, with one or two robots and one or two learner hosts,
+sample every update batch **after all episodes of that round enter replay**.
+There is no batch prefetch across rounds. Critic and actor sampling both use
+replacement, including the distributed sampler; robot-local n-step boundaries
+remain unchanged. The legacy `--split_role=local` path retains its existing behavior.
+
+The human-to-policy handoff zero poll remains in the control/transport stream,
+but is excluded from split/colocated replay files and learning. Normal policy
+zeros and human holds remain trainable. If the poll ends the episode, its reward
+and terminal mask are attached to the preceding retained action, preserving the
+episode boundary. Transition counters count retained online records, not polls.
+Episode length and intervention rate still use actual control steps, including
+the handoff poll; excluding a row from learning does not change those metrics.
+
 Local multi-robot warmup is ten completed episodes per robot. Split warmup is
 controlled by `--split_warmup_episodes` (default 10); the minimum-batch-size gate
-also applies. With `num_updates>0`, that many update calls run per paired round,
+also applies. Split/colocated counts the just-completed round: with warmup 10,
+the first update follows episode 10 of each robot, not episode 11. Warmup 0 or 1
+can update after the first round if the batch-size gate is met.
+With `num_updates>0`, that many update calls run per paired round,
 each with the configured UTD. With zero, calls are derived from aggregate
 transitions and `step_interval`, retaining the remainder. `max_steps` counts
 transitions across robots and stops at a round boundary.
@@ -87,6 +104,12 @@ Both split and local multi-robot training overlap the next resets with updates
 and request background MP4 saving. They wait for the new policy and both resets
 before reading fresh observations. The last round starts no extra reset.
 Collection/eval/single-robot execution have their own reset/video paths.
+
+The online TUI shows total online transitions and per-robot transition counts.
+Episode counts, successes, last result and transitions continue across resume:
+the learner persists them in `split-<step>.json` and sends them with admission.
+Old checkpoints without these totals rebuild them during the existing replay
+restore read. Only progress through the restored checkpoint is retained.
 
 During human control, that robot skips policy inference and polls with the
 existing zero command. Actual executed actions, terminal/HIL flags and rewards

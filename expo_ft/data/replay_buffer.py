@@ -797,6 +797,7 @@ def restore_replay_buffer(
     up_to_step: int | None = None,
     max_transitions: int | None = None,
     skip_dummy_actions: bool = True,
+    on_restore=None,
 ) -> Any:
     """Restore replay buffer by re-inserting saved transitions from disk.
     If max_transitions is set, stop after inserting that many (e.g. for faster loading)."""
@@ -829,6 +830,8 @@ def restore_replay_buffer(
                 skipped += 1
                 continue
             replay_buffer.insert(transition)
+            if on_restore is not None:
+                on_restore(transition)
             inserted += 1
     if skipped > 0:
         logging.info("Skipped %d dummy (action=-1) transitions during replay buffer restore.", skipped)

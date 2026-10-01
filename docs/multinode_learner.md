@@ -33,8 +33,8 @@ starting ILIAD inference or a one-node learner.
 - `DistributedReplaySampler` uses a common seed and the checkpointed actor
   update counter to generate all 20 global minibatches' indices before gathering
   data. Each node takes 32 of each 64-row minibatch. Selection is uniform over
-  eligible `(robot, replay-row)` pairs, without replacement when N >= 64 and
-  with replacement when N < 64. Different UTD minibatches may reuse rows.
+  eligible `(robot, replay-row)` pairs with replacement for every pool size,
+  matching single-host split/colocated sampling. Different UTD minibatches may reuse rows.
   The success-only actor pool uses a separate RNG stream. Both nodes have the
   same ordered candidate pools; the sampler needs no RPC or mutable RNG state
   to resume. Existing single-host sampling remains with replacement.
@@ -229,7 +229,8 @@ changing checkpoint/fixture inputs; select a fresh stage instead.
 - Delta logs: `wan-ATTEMPT/learner-rank-{0,1}.log`, `transport-rank-0.log`, and
   `nccl.*.log`; ILIAD logs: `inference.log`, `mock-{0,1}.log`, `transport.log`.
 - Each `node-result-*.json` must say `passed: true`; both
-  `learner/learner-passed-rank-*.json` must confirm eight devices, 21/420 updates,
+  `learner/learner-passed-rank-*.json` must confirm eight devices, update counts
+  matching completed warmup rounds and the transition-count gate,
   replay verification, `distributed_sampling_verified` and
   `restored_update_sampling_exact`. Also check ILIAD's `inference-passed.json`.
 - NCCL logs must show `Selected provider is cxi`; launch sets
@@ -263,8 +264,9 @@ and multi-chunk array messages and propagation of leader exceptions.
 `tests/gpu/split_wan_smoke.py --performance --playback-hz=10` runs recorded
 mock clients on ILIAD and the real replay/update/snapshot pipeline. Set the
 above learner environment on both Delta ranks. `--warmup-episodes=1 --rounds=3`
-is a short integration check. Eight rounds provide one warmup, one first-update
-compile round, five measured cycles, and one final drain/checkpoint round.
+is a short integration check. Warmup includes the just-completed round; the
+first update can follow round 1 if its retained transition count meets batch size.
+Exclude the first compiled update and final drain/checkpoint when timing cycles.
 Initial and first updated GPU policy parameters get exact transfer checks;
 the measured cycles retain normal transport and schema checks.
 

@@ -45,7 +45,7 @@ flags.DEFINE_float("offline_ratio", 0.0, "Offline batch fraction; 0 inserts data
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_enum("update_type", "episode", ["episode", "step", "batch"], "When to run gradient updates: per episode, per step, or per batch of episodes.")
 flags.DEFINE_integer("num_batch", 1, "Number of episodes per update batch (only used when update_type=batch).")
-flags.DEFINE_integer("split_warmup_episodes", 10, "Completed prior episodes per robot required before split learner updates; batch-size gate also applies.", lower_bound=0)
+flags.DEFINE_integer("split_warmup_episodes", 10, "Completed episodes per robot before split/colocated updates, including the current round; batch-size gate also applies.", lower_bound=0)
 flags.DEFINE_integer("num_updates", 0, "Upstream-style fixed number of gradient updates per trigger (episode/step/batch). 0 = derive the count from --step_interval instead.")
 flags.DEFINE_integer("step_interval", 1, "One gradient update per this many collected transitions. update_type=step runs it every step_interval env steps; episode/batch runs the accumulated equivalent at the episode boundary (remainder carries over).")
 flags.DEFINE_integer("batch_size", 64, "Mini batch size.")
@@ -254,9 +254,10 @@ def main(_):
         actor_success_only=actor_success_only,
         use_dagger_hil_sampling=use_dagger_hil_sampling,
         dataset=dataset,
-        replay_buffers=replay_buffers if multi_robot or distributed_sampler is not None else None,
+        replay_buffers=replay_buffers if multi_robot or split else None,
         utd_axis=learner_group.size > 1,
         distributed_sampler=distributed_sampler,
+        sample_on_demand=split,
     )
 
     example_buffer = replay_buffer if FLAGS.offline_ratio == 0 or use_dagger_hil_sampling else offline_replay_buffer

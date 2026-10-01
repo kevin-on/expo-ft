@@ -212,8 +212,8 @@ def test_colocated_rounds_and_resume_with_actual_runners(tmp_path, monkeypatch, 
     result = run(agent, buffers)
     assert saved == [6 * num_robot]
     assert [len(b.rows) for b in buffers] == [6] * num_robot
-    assert sampled_weights == [0.] * (4 * num_robot) + [1.] * (2 * num_robot)
-    assert float(result.actor_train_state.params['weight'].value[0]) == 2
+    assert sampled_weights == [0.] * (2 * num_robot) + [1.] * (2 * num_robot) + [2.] * (2 * num_robot)
+    assert float(result.actor_train_state.params['weight'].value[0]) == 3
     assert all(data['robot-0/success_without_intervention'] == 1 for data in logged if 'episodes' in data)
     ledger = json.loads((tmp_path / f'split-{6 * num_robot}.json').read_text())
     assert ledger['episode_count'] == 3 * num_robot
@@ -222,7 +222,7 @@ def test_colocated_rounds_and_resume_with_actual_runners(tmp_path, monkeypatch, 
     sample_count = len(sampled_rngs)
     resumed = run(result, restored, start=6 * num_robot, resuming=True)
     assert sampled_rngs[sample_count] == ledger['inference_rng']
-    assert sampled_weights[sample_count:] == [2.] * (2 * num_robot)
+    assert sampled_weights[sample_count:] == [3.] * (2 * num_robot)
     assert [len(b.rows) for b in restored] == [8] * num_robot
     assert saved == [6 * num_robot, 8 * num_robot]
-    assert float(resumed.actor_train_state.params['weight'].value[0]) == 3
+    assert float(resumed.actor_train_state.params['weight'].value[0]) == 4

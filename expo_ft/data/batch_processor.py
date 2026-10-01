@@ -29,7 +29,10 @@ class BatchProcessor:
         replay_buffers=None,
         utd_axis=False,
         distributed_sampler=None,
+        sample_on_demand=False,
     ):
+        if sample_on_demand and replay_buffers is None:
+            replay_buffers = [replay_buffer]
         if distributed_sampler is not None:
             if not utd_axis or replay_buffers is None or offline_ratio != 0 or use_dagger_hil_sampling:
                 raise ValueError('Distributed replay sampling requires UTD layout and online robot buffers')
@@ -76,6 +79,8 @@ class BatchProcessor:
                 },
                 data_sharding=data_sharding,
             )
+            if sample_on_demand:
+                self.offline_iterator = self._offline_batches(int(batch_size * utd_ratio * offline_ratio))
 
         self.hil_iterator = None
         if use_dagger_hil_sampling:
@@ -202,6 +207,10 @@ class BatchProcessor:
         # Sample only when requested: no prefetch from the previous policy round.
         while True:
             yield self._sample_buffer(self.replay_buffer, batch_size, **sample_kwargs)
+
+    def _offline_batches(self, batch_size):
+        while True:
+            yield self._sample_buffer(self.offline_replay_buffer, batch_size)
 
     def _sample_success_actor_batch(self, rng):
         if self.offline_ratio == 0:

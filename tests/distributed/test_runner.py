@@ -21,10 +21,13 @@ from expo_ft.distributed import runner
 class ResumeTest(unittest.TestCase):
     def test_resume_uses_checkpoint_cursor_and_default_dummy_filter(self):
         for count in (1, 2):
-            with self.subTest(num_robot=count):
-                self.check_resume(count)
+            for saved_progress in (False, True):
+                with self.subTest(num_robot=count, saved_progress=saved_progress):
+                    self.check_resume(count, saved_progress)
 
-    def check_resume(self, count):
+    def check_resume(self, count, saved_progress):
+        admissions = []
+        releases = []
         @dataclass
         class Agent:
             rng: object
@@ -40,23 +43,28 @@ class ResumeTest(unittest.TestCase):
             def restore_success_marks(self):
                 pass
         class Peer:
-            def send(self, *args):
-                pass
+            def send(self, topic, key, value):
+                if topic == 'admit':
+                    admissions.append(value)
             def send_buffer(self, *args):
                 pass
             def flush(self):
                 pass
             def close(self):
                 pass
-            def release(self, *args):
-                pass
+            def release(self, topic, key):
+                releases.append((topic, key))
             def receive(self, topic, key):
                 if topic == 'installed':
                     return {'version': 44}
                 if topic == 'episode_end':
-                    return dict(version=44, length=2, success=True)
+                    return dict(version=44, length=3, success=True)
                 if topic == 'transition':
-                    return dict(version=44, transition=record(int(key.rsplit('/', 1)[1]) == 1))
+                    index = int(key.rsplit('/', 1)[1])
+                    row = record(index == 2)
+                    if index == 1:
+                        row.update(is_handoff=True, is_hil=False)
+                    return dict(version=44, transition=row)
                 if topic == 'round_finished':
                     return dict(version=44, inference_rng=[9, 8])
                 if topic == 'stopped':
@@ -74,6 +82,9 @@ class ResumeTest(unittest.TestCase):
                 dest.write_bytes(pickle.dumps(record(step % 2 == 0, dummy=step == 1)))
             state = dict(identity={'test': True}, episode_count=22, pending_steps=0,
                          combine_rng=[1, 2], inference_rng=[3, 4], last_session='old', last_round=10)
+            if saved_progress:
+                state['rollout_progress'] = [dict(completed=22 // count, successes=7,
+                    last='failure', transitions=44 // count) for _ in range(count)]
             (path / 'split-44.json').write_text(json.dumps(state))
             task = SimpleNamespace(control_hz=10, language_instruction='test', action_space='cartesian_velocity', gripper_action_space='velocity')
             flags = SimpleNamespace(split_session='new', config_task=task, num_robot=count, seed=42,
@@ -88,14 +99,30 @@ class ResumeTest(unittest.TestCase):
             patches.enter_context(patch.object(runner, '_channel', return_value=Peer()))
             patches.enter_context(patch.object(runner, 'identity', return_value={'test': True}))
             patches.enter_context(patch.object(runner, 'export_policy', return_value=__import__('contextlib').nullcontext(SimpleNamespace(size=100))))
-            patches.enter_context(patch('wandb.log'))
+            logs = patches.enter_context(patch('wandb.log'))
             with jax.default_device(jax.devices('cpu')[0]):
                 agent = runner.run_learner(flags, Agent(jax.random.PRNGKey(1)), buffers,
                     SimpleNamespace(next_batch=batch), manager, path,
                     lambda m, a, s: saved.append((s, a.updates)), 44, True, None, 1 if count == 2 else None)
             self.assertEqual(agent.updates, 7)
             self.assertEqual(saved, [(44 + 2 * count, 7)])
+            self.assertEqual(sum(topic == 'transition' for topic, _ in releases), 3 * count)
+            self.assertTrue(all(not row.get('is_handoff') for buffer in buffers for row in buffer.rows))
             self.assertEqual(len(list((path / 'abandoned-replay/new').glob('robot-*/*.pkl'))), 1)
             ledger = json.loads((path / f'split-{44 + 2 * count}.json').read_text())
             self.assertEqual(ledger['episode_count'], 22 + count)
             self.assertEqual(ledger['inference_rng'], [9, 8])
+            metrics = next(call.args[0] for call in logs.call_args_list if 'episodes' in call.args[0])
+            self.assertEqual(metrics['robot-0/episode_length'], 3)
+            self.assertAlmostEqual(metrics['robot-0/intervention_rate'], 2 / 3)
+            self.assertEqual(admissions[0]['total_transitions'], 44)
+            self.assertEqual(admissions[0]['completed_rounds'], 22 // count)
+            for robot in range(count):
+                prior = admissions[0]['rollout_progress'][robot]
+                self.assertEqual(prior['completed'], 22 // count)
+                self.assertEqual(prior['successes'], 7 if saved_progress else 22 // count)
+                current = ledger['rollout_progress'][robot]
+                self.assertEqual(current['completed'], prior['completed'] + 1)
+                self.assertEqual(current['successes'], prior['successes'] + 1)
+                self.assertEqual(current['transitions'], prior['transitions'] + 2)
+                self.assertEqual(current['last'], 'success')

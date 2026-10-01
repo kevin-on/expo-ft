@@ -11,7 +11,7 @@ class DistributedReplaySampler:
     or an ordered array of eligible row indices for one robot's replay. All
     hosts must have the same candidates, seed and completed-update counter.
     There is no mutable RNG/cursor to checkpoint. Reuse across UTD minibatches
-    is allowed; replacement within a minibatch is used only when N < B.
+    is allowed; all draws use replacement, matching single-host replay sampling.
     """
 
     def __init__(self, *, seed: int, global_batch_size: int, rank: int, world_size: int):
@@ -40,8 +40,7 @@ class DistributedReplaySampler:
         begin = self.rank * self.local_batch_size
         selected = np.empty((num_batches, self.local_batch_size), dtype=np.int64)
         for minibatch in range(num_batches):
-            indices = rng.choice(total, self.global_batch_size,
-                                 replace=total < self.global_batch_size)
+            indices = rng.choice(total, self.global_batch_size, replace=True)
             selected[minibatch] = indices[begin:begin + self.local_batch_size]
         ends = np.cumsum(counts)
         robots = np.searchsorted(ends, selected, side='right')

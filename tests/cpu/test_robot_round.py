@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from expo_ft.utils.robot_round import collect_round, updates_for_round
+from expo_ft.distributed.protocol import training_round
 
 
 class FakeEnv:
@@ -76,6 +77,40 @@ def test_human_override_discards_remaining_chunk():
     assert rows[1]["is_hil"] and np.all(rows[1]["actions"] == 99)
     assert np.all(rows[2]["actions"] == 0)  # zero-command handoff, as in the original loop
     assert np.all(rows[3]["actions"] == 2)
+
+
+@pytest.mark.parametrize('num_robot', [1, 2])
+@pytest.mark.parametrize('length', [3, 4])
+def test_split_handoff_filtered_but_zero_policy_and_human_actions_retained(num_robot, length):
+    class ZeroHuman(FakeEnv):
+        def step(self, action):
+            result, source = super().step(action)
+            return np.zeros_like(result), source
+    envs = [ZeroHuman(length, robot=r, human_at=1) for r in range(num_robot)]
+    stream = []
+    episodes = collect_round(envs, lambda _: np.zeros((8, 2)), 8, 10000,
+                             mark_handoff=True,
+                             on_transition=lambda r, i, row: stream.append((r, i, row.copy())))
+    for raw, (rows, success) in zip(episodes, training_round(episodes)):
+        assert success and len(rows) == length - 1
+        assert raw[0][2]['is_handoff']
+        assert all(np.all(row['actions'] == 0) for row in rows)
+        assert rows[1]['is_hil']
+        assert rows[-1]['dones'] and rows[-1]['masks'] == 0
+        assert rows[-1]['rewards'] == 1
+        assert not any(row['dones'] for row in rows[:-1])
+        assert all('is_handoff' not in row for row in rows)
+        # Filtering never rewrites an already transmitted record.
+        assert raw[0][1]['dones'] is False
+    assert len(stream) == num_robot * length
+
+
+def test_terminal_handoff_does_not_mutate_array_reward_in_original_stream():
+    raw = [dict(actions=np.zeros(2), rewards=np.array(0.), dones=False, masks=1.),
+           dict(actions=np.zeros(2), rewards=np.array(1.), dones=True, masks=0., is_handoff=True)]
+    rows, _ = training_round([(raw, True)])[0]
+    assert len(rows) == 1 and rows[0]['rewards'] == 1 and rows[0]['dones']
+    assert raw[0]['rewards'] == 0 and not raw[0]['dones']
 
 
 def test_continuous_human_control_skips_inference_and_resumes():

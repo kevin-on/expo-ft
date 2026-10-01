@@ -16,10 +16,10 @@ import numpy as np
 
 from .channel import Channel, atomic_json
 from .policy import export_policy, import_policy, identity
-from .protocol import key, receive_round, task_contract
+from .protocol import key, receive_round, task_contract, training_round
 from .learner_group import LearnerGroup, local_value, replicate
 from expo_ft.utils.log_utils import log_round_interventions
-from expo_ft.utils.rollout_dashboard import RolloutDashboard
+from expo_ft.utils.rollout_dashboard import RolloutDashboard, RolloutProgress
 
 
 def _channel(flags):
@@ -67,6 +67,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
     if group.call(lambda: contract) != contract:
         raise ValueError('learner nodes have different policy identities')
     episode_count, pending_steps, step, round_id = 0, 0, start_step, 0
+    progress = RolloutProgress(len(buffers))
     combine_rng = jax.random.PRNGKey(flags.seed + 100)
     inference_rng = None
     if resuming:
@@ -76,14 +77,21 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
         if state['last_session'] == session:
             raise ValueError('resume requires a fresh session ID')
         episode_count, pending_steps = state['episode_count'], state['pending_steps']
+        saved_progress = state.get('rollout_progress')
+        progress = RolloutProgress(len(buffers), saved_progress)
         combine_rng = replicate(np.asarray(state['combine_rng'], dtype=np.uint32), replicated_sharding)
         inference_rng = state['inference_rng']
         group.call(lambda: prepare_robot_replay_resume(
             directory, up_to_step=step, num_robot=len(buffers),
             abandoned_dir=directory / 'abandoned-replay' / session))
         for index, buffer in enumerate(buffers):
-            restore_replay_buffer(directory / f'robot-{index}', buffer, up_to_step=start_step)
+            # Old checkpoints have no TUI totals. Rebuild them during the existing
+            # replay read, rather than reading all saved images a second time.
+            restore_replay_buffer(directory / f'robot-{index}', buffer, up_to_step=start_step,
+                on_restore=(lambda record, robot=index: progress.record(robot, record))
+                           if saved_progress is None and group.leader else None)
             buffer.restore_success_marks()
+        progress = RolloutProgress(len(buffers), group.call(progress.snapshot))
     version = step
     policy_started = time.monotonic()
     policy_metrics = {}
@@ -107,6 +115,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
         # The checkpoint cursor is independent from transport receipt IDs.
         group.call(lambda: atomic_json(directory / f'split-{step}.json', {
             'identity': contract, 'episode_count': episode_count, 'pending_steps': pending_steps,
+            'rollout_progress': progress.snapshot(),
             'combine_rng': local_value(combine_rng).tolist(),
             'inference_rng': inference_rng, 'last_session': session, 'last_round': round_id,
         }))
@@ -117,6 +126,8 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             def admit():
                 channel.send('admit', key(session, round_id), {
                     'version': version, 'identity': contract, 'inference_rng': inference_rng if round_id == 0 else None,
+                    'rollout_progress': progress.snapshot(), 'total_transitions': step,
+                    'completed_rounds': episode_count // len(buffers),
                 })
                 channel.flush()
                 return channel.receive('installed', key(session, round_id))
@@ -136,10 +147,11 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
                 finished = channel.receive('round_finished', key(session, round_id))
                 return episodes, finished
 
-            episodes, finished = group.call(receive)
+            received_episodes, finished = group.call(receive)
             if finished['version'] != version:
                 raise ValueError('round completion version mismatch')
             inference_rng = finished['inference_rng']
+            episodes = training_round(received_episodes)
             # Persist both episodes before releasing transport buffers or admitting
             # the round to replay. A failed save cannot permit reset/update.
             for records, success in episodes:
@@ -154,7 +166,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
                     next_step += len(records)
                 # Small transport receipts remain for deduplication. With replay
                 # checkpointing disabled, persistence is deliberately skipped.
-                for robot, (records, _) in enumerate(episodes):
+                for robot, (records, _) in enumerate(received_episodes):
                     for index in range(len(records)):
                         channel.release('transition', key(session, round_id, robot, index))
                     channel.release('episode_end', key(session, round_id, robot))
@@ -166,10 +178,13 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             for robot, (buffer, (records, success)) in enumerate(zip(buffers, episodes)):
                 for record in records:
                     buffer.insert(record)
+                    progress.record(robot, record)
                     step += 1
                 metrics[f'robot-{robot}/success'] = float(success)
-                metrics[f'robot-{robot}/episode_length'] = len(records)
-                metrics[f'robot-{robot}/return'] = sum(float(r['rewards']) for r in records)
+                control_records = received_episodes[robot][0]
+                metrics[f'robot-{robot}/episode_length'] = len(control_records)
+                metrics[f'robot-{robot}/return'] = sum(float(r['rewards']) for r in control_records)
+            episode_count += len(episodes)
             count, pending_steps = updates_for_round(
                 pending_steps, round_steps, can_update=episode_count >= flags.split_warmup_episodes * len(buffers) and step >= flags.batch_size,
                 num_updates=flags.num_updates, step_interval=flags.step_interval,
@@ -197,8 +212,7 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
             update_finished = time.monotonic()
             if count:
                 metrics['split/update_seconds'] = update_finished - update_started
-            episode_count += len(episodes)
-            log_round_interventions(episodes, metrics)
+            log_round_interventions(received_episodes, metrics)
             metrics.update(episodes=episode_count, updates=count, round_steps=round_steps, policy_version=version)
             # Leave this step open for the next installed-policy timing ACK.
             # Otherwise W&B discards that second log at the already-committed step.
@@ -368,6 +382,8 @@ def run_inference(flags, agent=None, env_factory=None, *, channel=None,
             if admit['identity'] != contract:
                 raise ValueError('learner/inference configuration mismatch')
             version = admit['version']
+            if dashboard is not None and 'rollout_progress' in admit:
+                dashboard.restore_progress(admit['rollout_progress'], admit['total_transitions'])
             install_metrics = {}
             if installed != version:
                 if dashboard is not None:
@@ -401,7 +417,7 @@ def run_inference(flags, agent=None, env_factory=None, *, channel=None,
             finish_resets()
             resets = []
             if dashboard is not None:
-                dashboard.ready(round_id, version)
+                dashboard.ready(admit.get('completed_rounds', round_id), version)
             def sample(observation):
                 nonlocal agent
                 actions, agent, _ = agent.sample_actions(observation)
@@ -409,7 +425,7 @@ def run_inference(flags, agent=None, env_factory=None, *, channel=None,
             def transition(robot, step, record):
                 channel.send('transition', key(session, round_id, robot, step), {'version': version, 'transition': record})
                 if dashboard is not None:
-                    dashboard.step(robot, step + 1, record['is_hil'])
+                    dashboard.step(robot, step + 1, record['is_hil'], trainable=not record.get('is_handoff', False))
             def end(robot, length, success):
                 channel.send('episode_end', key(session, round_id, robot), {'version': version, 'length': length, 'success': bool(success)})
                 if dashboard is not None:
@@ -418,7 +434,7 @@ def run_inference(flags, agent=None, env_factory=None, *, channel=None,
                 return dashboard.wait_for_start(robot, stopped, reset=envs[robot].reset_only)
             collect_round(envs, sample, flags.replan_steps, flags.config_task.control_hz,
                           mirror_robot=mirror_robot, on_transition=transition, on_episode_end=end,
-                          check_session=check_session, reset_done=True, canonical_frame=True,
+                          check_session=check_session, reset_done=True, canonical_frame=True, mark_handoff=True,
                           **({'wait_for_start': wait_for_start} if dashboard is not None else {}))
             if dashboard is not None:
                 dashboard.set_phase('Round complete; waiting for learner / replay')

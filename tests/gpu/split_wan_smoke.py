@@ -288,6 +288,10 @@ def model_role(args):
         client_host='127.0.0.1', client_port=args.port, output_dir=str(args.output), run_name='recorded-wan',
         max_steps=manifest['transitions'], batch_size=64, utd_ratio=20, num_updates=3, step_interval=50,
         checkpoint_model=True, checkpoint_buffer=True, checkpoint_interval=0)
+    cumulative = np.cumsum([sum(robot[i]['length'] for robot in manifest['robots'])
+                            for i in range(args.rounds)])
+    update_rounds = [i + 1 >= args.warmup_episodes and steps >= flags.batch_size
+                     for i, steps in enumerate(cumulative)]
     channel = None
     original_channel = runner._channel
     def capture_channel(flags):
@@ -373,7 +377,7 @@ def model_role(args):
             return agent
         runner.import_policy = checked_import
         runner.run_inference(flags)
-        assert len(versions) == args.rounds - args.warmup_episodes
+        assert len(versions) == 1 + sum(update_rounds[:-1])
         assert len(set(parameter_hashes)) == len(parameter_hashes)
         (args.output / 'inference-passed.json').write_text(json.dumps({'versions': versions, 'parameter_hashes': parameter_hashes}))
         return
@@ -487,7 +491,7 @@ def model_role(args):
     runner.receive_round, runner.export_policy = checked_round, checked_export
     agent = runner.run_learner(flags, agent, buffers, processor, manager, args.output / 'checkpoints', save_checkpoint,
                               0, False, replicated, 1)
-    updates = (args.rounds - args.warmup_episodes) * 3
+    updates = sum(update_rounds) * flags.num_updates
     restored = restore_checkpoint(manager, agent)
     assert int(local_value(restored.actor_train_state.step)) == updates
     assert int(local_value(restored.critic.step)) == updates * flags.utd_ratio
@@ -521,8 +525,9 @@ def model_role(args):
                 continue
             plan = np.concatenate([np.asarray(row['selected']) for row in rows], axis=1)
             assert plan.shape == (rows[0]['num_batches'], 64, 2)
-            if sum(rows[0]['counts']) >= 64:
-                assert all(len(set(map(tuple, minibatch))) == 64 for minibatch in plan)
+            # Repeated (robot, row) pairs are expected with replacement. Rank
+            # slices still compose one global batch; exact seeded plans are
+            # covered by cpu/test_distributed_sampler.py.
     round_number = group.call(lambda: round_number)
     assert round_number == args.rounds
     assert len(set(parameter_hashes)) == len(parameter_hashes)

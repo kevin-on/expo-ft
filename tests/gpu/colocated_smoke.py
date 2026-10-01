@@ -195,7 +195,11 @@ def main():
         assert ledger['episode_count'] == (first_round + args.rounds) * args.num_robot
     rounds = [x for x in log if 'round_steps' in x]
     assert len(rounds) == args.rounds
-    assert sum(x['updates'] for x in rounds) == (args.rounds - (not args.resume)) * args.num_updates
+    cursor = start_step
+    for metrics in rounds:
+        cursor += metrics['round_steps']
+        # Warmup=1 counts this completed round; the transition-count gate remains.
+        assert metrics['updates'] == (args.num_updates if cursor >= args.batch_size else 0)
     assert int(np.asarray(final_agent[0].actor_train_state.step)) > initial_actor_step[0]
     assert verify_records(checkpoint_dir, selected, start_step) == final_step
     report = dict(num_robot=args.num_robot, devices=[str(d) for d in jax.devices()],

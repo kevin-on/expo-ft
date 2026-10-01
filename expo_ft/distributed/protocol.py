@@ -43,3 +43,26 @@ def receive_round(channel, session, round_id, version, num_robot):
             records.append(record)
         result.append((records, bool(end['success'])))
     return result
+
+
+def training_round(episodes):
+    """Remove control-only handoff polls after validating the complete stream.
+
+    Ordinary zero actions remain. If termination/reward arrived on the poll,
+    attach it to the preceding retained action so replay still ends the episode.
+    The original stream is untouched for transport receipt/release accounting.
+    """
+    result = []
+    for records, success in episodes:
+        kept = []
+        for record in records:
+            if record.get('is_handoff', False):
+                if not kept:
+                    raise ValueError('Handoff requires a preceding executed action')
+                kept[-1]['rewards'] = kept[-1]['rewards'] + record['rewards']
+                if record['dones']:
+                    kept[-1].update(dones=True, masks=record['masks'])
+            else:
+                kept.append({k: v for k, v in record.items() if k != 'is_handoff'})
+        result.append((kept, success))
+    return result

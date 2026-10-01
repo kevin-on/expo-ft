@@ -10,6 +10,29 @@ import time
 import tty
 
 
+class RolloutProgress:
+    """Checkpointed episode totals, independent of whether a TUI is running."""
+
+    def __init__(self, num_robot, state=None):
+        self.robots = ([dict(completed=0, successes=0, last='-', transitions=0)
+                        for _ in range(num_robot)] if state is None
+                       else [dict(row) for row in state])
+        if len(self.robots) != num_robot:
+            raise ValueError('Rollout progress robot count changed')
+
+    def record(self, robot, transition):
+        row = self.robots[robot]
+        row['transitions'] += 1
+        if transition['dones']:
+            success = bool(transition.get('is_success', False))
+            row['completed'] += 1
+            row['successes'] += int(success)
+            row['last'] = 'success' if success else 'failure'
+
+    def snapshot(self):
+        return [dict(row) for row in self.robots]
+
+
 class RolloutDashboard:
     def __init__(self, num_robot, max_steps, mode="manual"):
         self.mode, self.max_steps = mode, max_steps
@@ -20,8 +43,9 @@ class RolloutDashboard:
         self.policy = "-"
         self.phase = "Waiting for learner policy"
         self.message = ""
+        self.total_transitions = 0
         self.states = [dict(status="connecting", steps=0, completed=0, successes=0,
-                            last="-", seconds=0., started=None, human=0) for _ in range(num_robot)]
+                            last="-", transitions=0, seconds=0., started=None, human=0) for _ in range(num_robot)]
         self.fd = None
         self.thread = None
         self.lines = 0
@@ -36,6 +60,15 @@ class RolloutDashboard:
     def set_phase(self, phase):
         with self.condition:
             self.phase = phase
+
+    def restore_progress(self, progress, total_transitions):
+        with self.condition:
+            if len(progress) != len(self.states):
+                raise ValueError('Rollout progress robot count changed')
+            for state, row in zip(self.states, progress):
+                for name in ('completed', 'successes', 'last', 'transitions'):
+                    state[name] = row[name]
+            self.total_transitions = total_transitions
 
     def resetting(self, robot):
         with self.condition:
@@ -107,11 +140,13 @@ class RolloutDashboard:
                 self.condition.notify_all()
         return False
 
-    def step(self, robot, steps, is_hil):
+    def step(self, robot, steps, is_hil, *, trainable=True):
         with self.condition:
             state = self.states[robot]
             state.update(status="human" if is_hil else "running", steps=steps)
             state["human"] += int(bool(is_hil))
+            state['transitions'] += int(trainable)
+            self.total_transitions += int(trainable)
 
     def episode_done(self, robot, success):
         with self.condition:
@@ -124,15 +159,16 @@ class RolloutDashboard:
     def draw(self):
         with self.condition:
             rows = [f"Online FT | {self.mode.upper()} | Round {self.round} | Policy {self.policy} | {self.phase}",
+                    f"Total transitions: {self.total_transitions:,} (online replay; excludes demos and handoff polls)",
                     "0/1: start robot  Space: start READY robots  r/t: reset robot0/1 (manual READY)  m: auto/manual  q: stop",
-                    "Robot  Status          Step   Episodes   Success       Last       Seconds  Human"]
+                    "Robot  Status          Step   Episodes   Success       Last       Seconds  Human  Transitions"]
             for robot, state in enumerate(self.states):
                 count = state["completed"]
                 rate = state["successes"] / count if count else 0.
                 seconds = time.monotonic() - state["started"] if state["started"] is not None else state["seconds"]
                 rows.append(f"  {robot}    {state['status']:<14} {state['steps']:>3}/{self.max_steps:<3}"
                             f"   {count:>4}     {state['successes']:>3} ({rate:>4.0%})"
-                            f"  {state['last']:<9} {seconds:>6.1f}s  {state['human']:>4}")
+                            f"  {state['last']:<9} {seconds:>6.1f}s  {state['human']:>4}  {state['transitions']:>8,}")
             rows.append(self.message)
         if self.lines:
             print(f"\033[{self.lines}F", end="")
@@ -180,7 +216,7 @@ class RolloutDashboard:
         self.fd = sys.stdin.fileno()
         self.old_termios = termios.tcgetattr(self.fd)
         tty.setcbreak(self.fd)
-        self.message = f"Log: {log_path} | Episode totals are for this inference session"
+        self.message = f"Log: {log_path} | Totals continue from the learner checkpoint on resume"
         self.thread = threading.Thread(target=self._terminal_loop, name="rollout-dashboard", daemon=True)
         self.thread.start()
 

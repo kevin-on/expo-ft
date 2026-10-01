@@ -10,7 +10,7 @@ is authorized to access physical hardware merely because it is named a test.
 | Location | Purpose / dependencies |
 | --- | --- |
 | `cpu/` | Replay mixing and restore, multi-robot barriers/RPC, mirror/eval/config and conversion; Python3.11, `cpu/requirements.txt`, openpi-client; CPU JAX |
-| `cpu/test_distributed_sampler.py` | Global minibatch uniqueness, small/empty pools, rank slices, success filtering, batch order and replay-restore reproduction |
+| `cpu/test_distributed_sampler.py` | Replacement sampling, small/empty pools, rank slices, success filtering, post-insertion batch timing and replay-restore reproduction |
 | `distributed/` `test_*.py` | RAM transport, TLS, corruption/failover, relay supervision, policy contract, cancellation and checkpoint resume; standard unittest, xxhash/numpy/websockets as used by each test |
 | `../client/tests/` | Mocked HID/camera/RPC, teleop vertical/bounds/reset, collection persistence/video; client test dependencies, no device access |
 | `test_async_video_isolated.py` | Video ownership/backpressure/drain, terminal response before encoding completes |
@@ -20,6 +20,11 @@ is authorized to access physical hardware merely because it is named a test.
 The isolated tests are regression coverage for current behavior, not disposable
 implementation experiments. Preserve them when cleaning up measurement scripts.
 Their fakes avoid robot/GPU imports; they do not replace real-model verification.
+
+`test_rollout_dashboard_isolated.py` covers resumed counters and live transition
+display. `cpu/test_robot_round.py` checks handoff exclusion, including terminal
+handoffs, without dropping intentional zero actions. `distributed/test_runner.py`
+checks old/new checkpoint progress restore and handoff transport/replay cursors.
 
 `test_colocated_isolated.py` runs the split round/barrier/failure regressions with
 the actual in-process mailbox and verifies supervisor shutdown. It is stdlib-only.
