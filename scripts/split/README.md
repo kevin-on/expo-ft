@@ -461,6 +461,14 @@ checks the file and both ranks participate in saving. Ctrl+C here exits only
 the request script. This requires the updated learner code; it does not add
 manual saving to an already-running older process.
 
+Automatic saves use fixed multiples of `checkpoint_interval` in the global
+transition count, independent of manual saves and resume. With interval 1000,
+a manual save at 900 does not delay the 1000 boundary. Saving still happens
+after a completed round/update: if that round ends at 1013, the checkpoint is
+named 1013 and the next automatic boundary remains 2000. Crossing multiple
+boundaries in one round saves the current state once; no intermediate states
+are fabricated. Normal final-checkpoint saving is unchanged.
+
 - Per-run shared logs: `learner.log`, `inference.log`, `transport-ROLE.log`.
   Checkpoints/replay: `DELTA_RUN_ROOT/RUN/checkpoints`.
   Videos are written on WS to `WS_VIDEO_ROOT`, not to ILIAD's filesystem.

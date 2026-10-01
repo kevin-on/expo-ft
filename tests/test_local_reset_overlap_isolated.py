@@ -15,6 +15,25 @@ from test_split_reset_overlap_isolated import Array, load_definitions, ROOT
 
 
 class LocalOverlapTests(unittest.TestCase):
+    def test_single_robot_episode_sink_manual_saves_keep_fixed_boundaries(self):
+        forced, saves = [False], []
+        ns = dict(logging=logging,
+                  sys=NS(stdin=NS(isatty=lambda: forced[0], readline=lambda: '')),
+                  select=NS(select=lambda *args: ([True], [], [])))
+        load_definitions('expo_ft/utils/loop_utils.py', {'EpisodeSink'}, ns)
+        def sink(start):
+            return ns['EpisodeSink'](None, None, NS(wait_until_finished=lambda: None), None,
+                lambda manager, agent, step: saves.append(step), save_buffer=False,
+                checkpoint_model=True, checkpoint_interval=1000, start_step=start)
+        target = sink(0)
+        for step, manual in ((900, True), (1013, False), (1500, True), (2008, False), (2999, False)):
+            forced[0] = manual
+            target.maybe_save_checkpoint(step, None)
+        self.assertEqual(saves, [900, 1013, 1500, 2008])
+        sink(1500).maybe_save_checkpoint(2008, None)
+        self.assertEqual(saves[-1], 2008)
+        self.assertEqual(len(saves), 5)
+
     def run_local(self, *, slow_reset=False, fail_reset=None, fail_update=False,
                   fail_save=False, fail_close=False, rounds=12, start_step=0,
                   manual_save=False, checkpoint_interval=0):

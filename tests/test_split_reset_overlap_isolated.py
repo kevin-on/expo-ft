@@ -400,6 +400,21 @@ class SplitOverlapTests(unittest.TestCase):
         self.assertEqual([e for e in events if e[0] == 'model_checkpoint'],
                          [('model_checkpoint', 2), ('model_checkpoint', 4), ('model_checkpoint', 6)])
 
+    def test_manual_checkpoint_does_not_delay_interval_single_robot(self):
+        events = self.run_pair(num_robot=1, warmup=1, max_steps=7, manual_save=True,
+                               checkpoint_buffer=True, checkpoint_interval=3)
+        self.assertEqual([e[1] for e in events if e[0] == 'model_checkpoint'], [1, 3, 6, 7])
+
+    def test_interval_boundaries_do_not_drift_after_round_overshoot(self):
+        events = self.run_pair(warmup=1, max_steps=10, manual_save=True,
+                               checkpoint_buffer=True, checkpoint_interval=3)
+        self.assertEqual([e[1] for e in events if e[0] == 'model_checkpoint'], [2, 4, 6, 10])
+
+    def test_restored_step_keeps_global_interval_boundaries(self):
+        events = self.run_pair(num_robot=1, start_step=4, warmup=1, max_steps=9,
+                               checkpoint_buffer=True, checkpoint_interval=3)
+        self.assertEqual([e[1] for e in events if e[0] == 'model_checkpoint'], [6, 9])
+
     def test_policy_ready_first_still_waits_for_both_resets(self):
         self.run_pair(slow_reset=True)
 

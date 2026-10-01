@@ -220,8 +220,9 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
                 wandb.log(metrics, step=step, commit=not (count and step < flags.max_steps))
             logging.info('Split round %d complete: %d episodes, %d transitions, %d updates', round_id, episode_count, step, count)
             manual_save = group.call(save_request.is_file)
+            # Fixed global-step boundaries; a manual save must not shift them.
             if manual_save or (flags.checkpoint_model and flags.checkpoint_interval > 0
-                               and step - last_checkpoint >= flags.checkpoint_interval):
+                               and step // flags.checkpoint_interval > last_checkpoint // flags.checkpoint_interval):
                 checkpoint()
                 if manual_save:
                     checkpoint_manager.wait_until_finished()

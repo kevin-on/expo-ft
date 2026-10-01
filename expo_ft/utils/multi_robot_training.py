@@ -137,8 +137,9 @@ def train_multi_robot(flags, agent, buffers, batch_processor, checkpoint_manager
             wandb.log(metrics, step=step)
             logging.info("Round complete: %d episodes, %d transitions, %d updates", episode_count, step, count)
             manual_save = save_request.is_file()
+            # Fixed global-step boundaries; a manual save must not shift them.
             if manual_save or (flags.checkpoint_model and flags.checkpoint_interval > 0
-                               and step - last_checkpoint >= flags.checkpoint_interval):
+                               and step // flags.checkpoint_interval > last_checkpoint // flags.checkpoint_interval):
                 checkpoint()
                 if manual_save:
                     checkpoint_manager.wait_until_finished()

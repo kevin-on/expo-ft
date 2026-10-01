@@ -211,7 +211,8 @@ class EpisodeSink:
         else:
             if not self.checkpoint_model or self.checkpoint_interval <= 0:
                 return
-            if step - self.last_ckpt_step < self.checkpoint_interval:
+            # Compare global interval buckets, not elapsed steps since a manual save.
+            if step // self.checkpoint_interval <= self.last_ckpt_step // self.checkpoint_interval:
                 return
         try:
             self.save_checkpoint_fn(self.checkpoint_manager, agent, step)
