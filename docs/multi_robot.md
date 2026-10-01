@@ -3,6 +3,10 @@
 Start with the [operating guide](../scripts/split/README.md) for WS/DeltaAI/ILIAD
 commands. This page covers current robot configuration and training semantics.
 The optional split path is described in [split architecture](split_training.md).
+For the same split workflow on one GPU host, use `--split_role=colocated` with
+`--num_robot=1` or `2`; see [colocated execution](../scripts/split/README.md#same-host-learner-and-inference-colocated).
+This reuses the split runners/TUI and the learner's GPU0 parameters. The default
+`--split_role=local` below remains the older local loop.
 
 ## Configuration and hardware ownership
 

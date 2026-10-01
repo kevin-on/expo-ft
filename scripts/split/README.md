@@ -509,3 +509,59 @@ are unchanged, but one round now contains one episode instead of two. Warmup rem
 per robot, and global step/checkpoint intervals count only collected transitions.
 Changing robot count on an existing split checkpoint is not supported: start a
 fresh run from SFT. Camera mappings are checked for single-robot sessions too.
+
+### Same-host learner and inference (colocated)
+
+`--split_role=colocated` runs the **same split runners** in one Python process.
+It supports `--num_robot=1` (robot0) and `--num_robot=2` (robot1 mirrored), including
+the dashboard, manual starts/resets, warmup, intervention metrics, replay batches,
+manual checkpoint requests, reset/update overlap and split checkpoint resume.
+The existing `--split_role=local` remains the legacy implementation.
+
+Use a single allocated GPU host/process with `--fsdp_devices=1`. All visible GPUs
+train; inference uses the existing full parameter replica on the first visible
+GPU. No extra inference model or frozen base is loaded. Each policy handoff selects
+existing JAX device buffers without snapshot export, hashing or host-RAM transfer.
+The ordinary split identity check still runs once during startup.
+Inference and learner RNGs remain separate. New policy views become visible only
+at the existing round barrier; rollout does not overlap gradient updates.
+
+There is no relay, transport sidecar or `--split_mailbox`. Transition/control
+messages stay in an in-process mailbox, preserving the split message ordering
+and record ownership. This also preserves the **one-host split sampling behavior**;
+it does not enable the separate multi-host sampler or change the update budget.
+
+Inside the matching training environment on the allocated GPU host, for example:
+
+```bash
+test ! -e "$RUN_ROOT/$RUN" || exit 1
+python train_pi_robo.py \
+  --split_role=colocated --num_robot=2 --fsdp_devices=1 \
+  --config=configs/model/expo_ft_pi_config.py --config_task=configs/task/pick.py \
+  --initial_sft_checkpoint="$SFT_CHECKPOINT" --dataset_path="$DEMO" \
+  --output_dir="$RUN_ROOT" --run_name="$RUN" --project_name=mtexpo \
+  --seed=42 --batch_size=64 --utd_ratio=20 --num_updates=3 \
+  --update_type=episode --replan_steps=8 --delay=0 --offline_ratio=0 \
+  --split_warmup_episodes=10 --max_steps=20000 \
+  --checkpoint_model --checkpoint_buffer --checkpoint_interval=2000 --overwrite \
+  --client_host=0.0.0.0 --client_port=8102 \
+  --rollout_dashboard --rollout_mode=manual \
+  --rollout_log="$RUN_ROOT/$RUN/rollout.log"
+```
+
+Set the four path/run variables to the intended existing SFT checkpoint, demo
+directory, output root and new run name. For one robot, change only `--num_robot=1`
+and start only client 0. The same WS clients connect to this host at ports 8102
+and 8103. Running this command opens the server side; robot clients are a separate
+action. A terminal is required for the dashboard (`ssh -tt`, `srun --pty`). Learner
+and inference logging share `rollout.log` in this mode.
+
+The existing checkpoint request tool can run in another pane using
+`$RUN_ROOT/$RUN/checkpoints`. The fresh-run command checks that the output is new
+before allowing checkpoint initialization. To resume, omit that directory check
+and replace `--overwrite` with `--resume` using the same run/config;
+the usual split ledger and replay files are used. A fresh session ID is generated
+unless `--split_session` is provided. Robot count must match the checkpoint.
+`scripts/split/run_role.sh` still launches the two remote roles; it is not the
+launcher for colocated mode. No allocation, GPU visibility, or client endpoint is
+changed automatically.

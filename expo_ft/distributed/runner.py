@@ -45,7 +45,8 @@ def _abort(channel, session):
 
 
 def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, checkpoint_dir,
-                save_checkpoint, start_step, resuming, replicated_sharding, mirror_robot):
+                save_checkpoint, start_step, resuming, replicated_sharding, mirror_robot,
+                *, channel=None, policy_exchange=None, contract=None):
     import wandb
     from expo_ft.data.replay_buffer import (
         prepare_robot_replay_resume, restore_replay_buffer, save_replay_buffer_batch,
@@ -54,15 +55,15 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
 
     directory = Path(checkpoint_dir)
     group = LearnerGroup()
-    channel = None
-
     def connect():
         nonlocal channel
-        channel = _channel(flags)
+        if channel is None:
+            channel = _channel(flags)
 
     group.call(connect)
     session = flags.split_session
-    contract = identity(agent, task_contract(flags, mirror_robot))
+    if contract is None:
+        contract = identity(agent, task_contract(flags, mirror_robot))
     if group.call(lambda: contract) != contract:
         raise ValueError('learner nodes have different policy identities')
     episode_count, pending_steps, step, round_id = 0, 0, start_step, 0
@@ -88,6 +89,9 @@ def run_learner(flags, agent, buffers, batch_processor, checkpoint_manager, chec
     policy_metrics = {}
 
     def publish_policy():
+        if policy_exchange is not None:
+            policy_metrics.update(policy_exchange.publish(agent, contract, version))
+            return
         started = time.monotonic()
         with export_policy(agent, contract, version) as snapshot:
             serialized = time.monotonic()
@@ -277,11 +281,12 @@ def build_inference(flags):
     return agent.replace(rng=jax.random.fold_in(jax.random.PRNGKey(flags.seed), 7351))
 
 
-def run_inference(flags, agent=None, env_factory=None):
+def run_inference(flags, agent=None, env_factory=None, *, channel=None,
+                  policy_exchange=None, contract=None):
     from expo_ft.env.env_client import EnvClientWrapper
     from expo_ft.utils.robot_round import collect_round
 
-    if flags.resume:
+    if flags.resume and policy_exchange is None:
         raise ValueError('Only learner uses --resume; inference receives RNG/policy from learner')
     dashboard = None
     if getattr(flags, 'rollout_dashboard', False):
@@ -290,10 +295,13 @@ def run_inference(flags, agent=None, env_factory=None):
         dashboard = RolloutDashboard(flags.num_robot, flags.config_task.auto_reset_steps, flags.rollout_mode)
     elif getattr(flags, 'rollout_mode', 'auto') == 'manual':
         raise ValueError('Manual rollout requires --rollout_dashboard')
-    agent = build_inference(flags) if agent is None else agent
+    if agent is None and policy_exchange is None:
+        agent = build_inference(flags)
     mirror_robot = 1 if flags.num_robot == 2 else None
-    contract = identity(agent, task_contract(flags, mirror_robot))
-    channel = _channel(flags)
+    if contract is None:
+        contract = identity(agent, task_contract(flags, mirror_robot))
+    if channel is None:
+        channel = _channel(flags)
     session, round_id, installed = flags.split_session, 0, None
     envs = []
     reset_workers = ThreadPoolExecutor(max_workers=flags.num_robot, thread_name_prefix='robot-reset')
@@ -364,10 +372,14 @@ def run_inference(flags, agent=None, env_factory=None):
             if installed != version:
                 if dashboard is not None:
                     dashboard.set_phase('Receiving / installing policy')
-                with channel.receive_buffer('policy', key(session, version), check=check_reset_errors) as snapshot:
-                    started = time.monotonic()
-                    agent = import_policy(agent, snapshot, contract, version)
-                    install_metrics = dict(snapshot.timings, install_seconds=time.monotonic() - started)
+                if policy_exchange is not None:
+                    agent, install_metrics = policy_exchange.install(
+                        agent, contract, version, check=check_reset_errors)
+                else:
+                    with channel.receive_buffer('policy', key(session, version), check=check_reset_errors) as snapshot:
+                        started = time.monotonic()
+                        agent = import_policy(agent, snapshot, contract, version)
+                        install_metrics = dict(snapshot.timings, install_seconds=time.monotonic() - started)
                 channel.release('policy', key(session, version))
                 installed = version
             if admit.get('inference_rng') is not None:

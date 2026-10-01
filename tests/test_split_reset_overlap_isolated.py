@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 import queue
+import runpy
 import tempfile
 import threading
 import time
@@ -97,7 +98,7 @@ class SplitOverlapTests(unittest.TestCase):
     def run_pair(self, *, slow_reset=False, fail_reset=False, fail_update=False,
                  num_robot=2, start_step=0, max_steps=24, warmup=10,
                  checkpoint_buffer=False, fail_save=False, manual_save=False,
-                 checkpoint_interval=2000):
+                 checkpoint_interval=2000, local_delivery=False):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         checkpoint_dir = Path(tmp.name)
@@ -288,6 +289,30 @@ class SplitOverlapTests(unittest.TestCase):
         load_definitions('expo_ft/utils/log_utils.py', ['log_round_interventions'], namespace)
         load_definitions('expo_ft/distributed/runner.py', ['_abort', 'run_learner', 'run_inference'], namespace)
         peers = [Peer(0), Peer(1)]
+        exchange = None
+        if local_delivery:
+            local = runpy.run_path(str(ROOT / 'expo_ft/distributed/local.py'))
+            session = local['LocalSession'](timeout=3)
+            # Keep the existing event/ordering assertions for both deliveries.
+            class LocalPeer(local['LocalChannel']):
+                def send(self, topic, key, value):
+                    events.append(('send', self.role, topic, key))
+                    return super().send(topic, key, value)
+                def release(self, topic, key):
+                    if checkpoint_buffer and self.role == 0:
+                        round_number = int(key.split('/')[1])
+                        test.assertTrue(all(n > round_number for n in saved))
+                    events.append(('release', self.role, topic, key))
+                    return super().release(topic, key)
+            peers = [LocalPeer(session, i) for i in range(2)]
+            class Exchange:
+                def publish(self, agent, contract, version):
+                    peers[0].send('policy', 'test/' + str(version), {'version': version})
+                    return {'policy_bytes': 0}
+                def install(self, agent, contract, version, *, check):
+                    snapshot = peers[1].receive('policy', 'test/' + str(version), check=check)
+                    return import_policy(agent, NS(**snapshot), contract, version), {}
+            exchange = Exchange()
         namespace['_channel'] = lambda flags: peers[flags.role]
         flags = dict(seed=1, split_session='test', num_robot=num_robot, client_host='', client_port=8102,
                      output_dir='unused', run_name='test', resume=False, max_steps=max_steps,
@@ -309,10 +334,11 @@ class SplitOverlapTests(unittest.TestCase):
                         NS(next_batch=lambda rng: ({}, None, rng)),
                         NS(wait_until_finished=lambda: events.append(('checkpoint_drained', save_request.is_file()))),
                         checkpoint_dir, lambda *args: events.append(('model_checkpoint', args[-1])),
-                        start_step, False, None, 1 if num_robot == 2 else None)
+                        start_step, False, None, 1 if num_robot == 2 else None,
+                        policy_exchange=exchange)
                 else:
                     namespace['run_inference'](inference_flags, inference_agent,
-                        env_factory=env_factory)
+                        env_factory=env_factory, policy_exchange=exchange)
             except BaseException as exc:
                 errors.put(exc)
         threads = [threading.Thread(target=run, args=(i,), daemon=True) for i in range(2)]

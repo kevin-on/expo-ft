@@ -21,6 +21,25 @@ The isolated tests are regression coverage for current behavior, not disposable
 implementation experiments. Preserve them when cleaning up measurement scripts.
 Their fakes avoid robot/GPU imports; they do not replace real-model verification.
 
+`test_colocated_isolated.py` runs the split round/barrier/failure regressions with
+the actual in-process mailbox and verifies supervisor shutdown. It is stdlib-only.
+`cpu/test_local_policy.py` uses tiny JAX arrays to check shared buffer pointers,
+one/two-device replica selection, refresh after a donated update, and independent
+inference RNGs. It also runs both actual split runners and the collector with a
+tiny fake model/robot, including batch replay persistence and resumed inference
+RNGs for one/two robots and one/two virtual devices. It uses no model weights or
+hardware; expose two virtual CPU
+devices for full coverage:
+
+```bash
+python tests/test_colocated_isolated.py
+JAX_PLATFORMS=cpu XLA_FLAGS=--xla_force_host_platform_device_count=2 \
+  python -m pytest -q tests/cpu/test_local_policy.py
+```
+
+These checks establish the local delivery/parameter-sharing semantics, not GPU
+throughput or full-model GPU execution.
+
 In the matching test environment, on an authorized idle compute node:
 
 ```bash
@@ -64,6 +83,17 @@ PYTHONPATH=/scr/kevinon/tmp/expo-hil-test-deps OPENBLAS_NUM_THREADS=1 OMP_NUM_TH
 - `gpu/split_smoke.py`: two model/transport processes on one allocated test node;
   seeded action parity, reset barrier, policy refresh and checkpoint save/restore.
   Useful when no WAN route is available; it does not measure WAN latency.
+- `gpu/colocated_smoke.py`: actual `train_pi_robo.py --split_role=colocated`
+  on two allocated GPUs, using recorded trajectories in place of robot RPCs.
+  Checks GPU0 parameter buffer sharing, seeded action equality with the split
+  snapshot path, real gradient updates, exact replay records and checkpoint
+  resume. A three-round run with `--num-robot 1` followed by the same output with
+  `--resume --rounds 1` covers persistence. Check the other robot count separately.
+  Once persistence/parity is established, `--rounds-only` skips model checkpoint
+  saves and snapshot comparisons while retaining updates, sharing and replay checks;
+  use `--batch-size 64 --utd-ratio 20 --num-updates 3` for production update timing.
+  W&B should be disabled. Its validation-only snapshot comparison is excluded
+  from production delivery timings. No WS or device connections are opened.
 - `gpu/split_wan_smoke.py`: two machines, recorded trajectories, real updates and
   loopback mock robot clients on inference. `--playback-hz=10` reproduces collection
   cadence; default 1000 is accelerated. See [the operating guide](../scripts/split/README.md#6-robot-free-10hz-verification)

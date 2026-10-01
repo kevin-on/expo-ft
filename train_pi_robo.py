@@ -76,7 +76,8 @@ flags.DEFINE_integer(
 flags.DEFINE_float("sim_latency", 0.0, "Simulated extra inference latency in ms added to each sample_actions call; 0 disables.")
 
 flags.DEFINE_string("dataset_path", "", "Path to preprocessed HDF5 demonstration episodes.")
-flags.DEFINE_enum("split_role", "local", ["local", "learner", "inference"], "Separate learner/rollout processes using local shared-RAM transport.")
+flags.DEFINE_enum("split_role", "local", ["local", "learner", "inference", "colocated"],
+                  "local: legacy loop; learner/inference: remote split; colocated: split roles sharing learner GPUs.")
 flags.DEFINE_string("split_mailbox", "", "Local socket/marker directory shared with this machine's RAM transport process.")
 flags.DEFINE_string("split_session", "", "Fresh session ID shared by both roles; use a new ID after restarting a run.")
 flags.DEFINE_boolean("rollout_dashboard", False, "Interactive rollout controls in the split inference terminal.")
@@ -103,17 +104,24 @@ def main(_):
     from expo_ft.utils.model_config import configure_training
     model_record = configure_training(FLAGS) if FLAGS.config.model_cls == "EXPOLearner" else None
     if FLAGS.rollout_dashboard or FLAGS.rollout_mode == "manual":
-        if FLAGS.split_role != "inference":
-            raise ValueError("Rollout dashboard/manual mode is supported on split inference only")
+        if FLAGS.split_role not in ("inference", "colocated"):
+            raise ValueError("Rollout dashboard/manual mode requires split inference or colocated mode")
     from expo_ft.distributed.learner_group import initialize_learner, LearnerGroup
     initialize_learner(FLAGS)
     learner_group = LearnerGroup()
     split = FLAGS.split_role != "local"
+    colocated = FLAGS.split_role == "colocated"
+    if colocated:
+        if learner_group.size != 1 or FLAGS.fsdp_devices != 1:
+            raise ValueError("Colocated mode requires one process and fsdp_devices=1 (replicated GPU0 policy)")
+        if not FLAGS.split_session:
+            import uuid
+            FLAGS.split_session = uuid.uuid4().hex
     if split:
         if (FLAGS.config.model_cls != "EXPOLearner" or FLAGS.update_type != "episode"
                 or FLAGS.delay != 0 or FLAGS.num_robot not in (1, 2)):
             raise ValueError("Split mode requires EXPOLearner, episode updates, delay=0, and 1 or 2 robots")
-        if not FLAGS.split_mailbox or not FLAGS.split_session:
+        if not colocated and (not FLAGS.split_mailbox or not FLAGS.split_session):
             raise ValueError("Split mode requires --split_mailbox and --split_session")
         if FLAGS.config.N < 1 or FLAGS.config.n_edit_samples < 0 or (FLAGS.config.N > 1
                 and FLAGS.config.n_edit_samples not in (0, FLAGS.config.N)):
@@ -301,9 +309,12 @@ def main(_):
         if not multi_robot and not split:
             batch_processor.restore(checkpoint_dir_path, up_to_step=latest_step)
 
-    if FLAGS.split_role == "learner":
-        from expo_ft.distributed.runner import run_learner
-        run_learner(FLAGS, agent, replay_buffers, batch_processor, checkpoint_manager,
+    if FLAGS.split_role in ("learner", "colocated"):
+        if colocated:
+            from expo_ft.distributed.local import run_colocated as run_split
+        else:
+            from expo_ft.distributed.runner import run_learner as run_split
+        run_split(FLAGS, agent, replay_buffers, batch_processor, checkpoint_manager,
                     checkpoint_dir, save_checkpoint, start_step, resuming, replicated_sharding,
                     mirror_robot=1 if FLAGS.num_robot == 2 else None)
         return
