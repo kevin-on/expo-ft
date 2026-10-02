@@ -16,6 +16,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from expo_ft.env.sft_eval import canonical_observation, physical_action
+from expo_ft.env.model_frame import ModelFrame, model_inputs
 from scripts.convert_two_robot_data_to_lerobot import prepare_step_for_sft
 from test_two_robot_conversion import example_step
 
@@ -33,7 +34,7 @@ class SFTEvalTests(unittest.TestCase):
                 wrist = raw["saved_observation"][f"wrist_image_{wrist_eye}"]
                 obs = dict(raw["saved_observation"], exterior_image_1_left=side,
                            exterior_image_2_left=side, wrist_image_left=wrist, prompt="pick up the cube")
-                actual = canonical_observation(obs, mirror=robot == 1)
+                actual = model_inputs(ModelFrame(cfg['model_frame']).observation(obs))
                 expected = prepare_step_for_sft(raw, mirror=robot == 1)
                 for key, value in expected["saved_observation"].items():
                     np.testing.assert_array_equal(actual[key], value)
@@ -46,9 +47,6 @@ class SFTEvalTests(unittest.TestCase):
                 for group in raw:
                     for key in raw[group]:
                         np.testing.assert_array_equal(raw[group][key], before[group][key])
-                for eye, role in ((side_eye, "varied_camera"), (wrist_eye, "hand_camera")):
-                    if eye == "right":
-                        self.assertFalse(cfg["camera_kwargs"][role]["left_only"])
                 training_cfg = json.loads((ROOT / f"configs/robots/robot-{robot}.json").read_text())
                 for key in ("robot_server_ip", "robot_server_port", "camera_serials", "spacemouse_device_path"):
                     self.assertEqual(cfg[key], training_cfg[key])
@@ -71,7 +69,7 @@ class SFTEvalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             canonical_observation(dict(obs, cartesian_position=np.zeros(7)), True)
 
-    def test_actual_eval_loop_mirrors_actions_and_logs_interventions(self):
+    def test_actual_eval_loop_accepts_ws_model_frame_and_logs_interventions(self):
         # Execute the real rollout loop AST with in-memory env/policy doubles.
         # Omit imports/model initialization so no device, network or GPU is opened.
         tree = ast.parse((ROOT / "eval_droid_policy.py").read_text())
@@ -96,8 +94,10 @@ class SFTEvalTests(unittest.TestCase):
                 policy_action = np.r_[expected["action"]["cartesian_velocity"], -1]
                 env = mock.Mock()
                 sent = []
-                env.reset.return_value = obs
-                env.get_observation.return_value = obs
+                frame = ModelFrame({'mirror_images': {'side': mirror, 'wrist': mirror},
+                                    'mirror_robot_coordinates': mirror})
+                env.reset.return_value = frame.observation(obs)
+                env.get_observation.return_value = frame.observation(obs)
                 terminal_checks = []
                 def get_info():
                     done = len(sent) >= end_after
@@ -107,7 +107,7 @@ class SFTEvalTests(unittest.TestCase):
                     return done, success, float(success), 1.
                 env.get_info_for_step.side_effect = get_info
                 def step(action):
-                    sent.append(action)
+                    sent.append(frame.action(action))
                     return np.asarray(action), "human" if len(sent) == 1 else "policy"
                 env.step.side_effect = step
                 agent = mock.Mock(spec=["sample_actions"])

@@ -159,3 +159,5 @@ runtime or alter a running robot's environment for test dependencies.
 Run `python tests/cpu/test_sft_eval.py` separately: its import-isolation assertion
 intentionally requires a process that has not imported JAX. Do not combine that
 assertion with RPC tests that import the training stack.
+
+- Camera runtime, WS frame conversion and timestamp propagation checks: see [camera observation runtime](../docs/camera_observation_runtime.md). These use fake SDK/RPC interfaces and require the matching DROID source on PYTHONPATH; they never open cameras or robots.

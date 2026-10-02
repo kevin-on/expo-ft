@@ -32,9 +32,12 @@ class ReaderTests(unittest.TestCase):
         camera._cam=Mock();camera._runtime=object();camera._right_img=object();camera._left_img=object()
         camera.zed_resolution=object();camera.latency=83
         camera._cam.grab.return_value=sl.ERROR_CODE.SUCCESS
+        camera._cam.retrieve_image.return_value=sl.ERROR_CODE.SUCCESS
         camera._cam.get_timestamp.return_value.get_milliseconds.return_value=1234
         camera._process_frame=lambda _:np.zeros((2,2,3),np.uint8)
         data, stamps=camera.read_camera()
         self.assertEqual(list(data['image']), ['s_right'])
         self.assertEqual(stamps['s_frame_received'],1234)
         camera._cam.retrieve_image.assert_called_once_with(camera._right_img,sl.VIEW.RIGHT,resolution=camera.zed_resolution)
+        camera._cam.retrieve_image.return_value = 'failed'
+        with self.assertRaisesRegex(RuntimeError, 'retrieve failed'): camera.read_camera()

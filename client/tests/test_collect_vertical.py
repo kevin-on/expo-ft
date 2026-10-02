@@ -48,7 +48,7 @@ class CollectVerticalTests(unittest.TestCase):
         controller.forward.return_value = (input_action, {})
         env.step.side_effect = lambda action: {'cartesian_velocity': action[:6].copy(),
                                                'gripper_velocity': action[6], 'executed_action': action.copy()}
-        fake_flags = SimpleNamespace(save_right_images=True, video_save_width=320, video_save_height=180)
+        fake_flags = SimpleNamespace(save_right_images=True, video_save_width=320, video_save_height=180, video_encoder_threads=2)
         with patch.object(collect, 'FLAGS', fake_flags), \
              patch.object(collect, 'collection_observation', return_value={}), \
              patch.object(collect, 'CollectionRecorder', return_value=writer), \

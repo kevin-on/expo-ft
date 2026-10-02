@@ -75,3 +75,35 @@ Legacy single-robot asynchronous/RTC entrypoints still use the common WS coordin
 boundary, but do not claim chunk provenance timing until their asynchronous plans
 explicitly carry this metadata; the split/colocated round and coordinated eval
 paths implement it.
+
+## Companion revisions and device-free checks
+
+DROID companion branch: `camera-observation-runtime`, revision `d717f4fd0e248c08474f853af1c59fc28437a1a6`.
+OpenPI is unchanged (validated companion `590fa99`). The feature worktree's
+client environment/source links are local conveniences, not tracked deployment
+inputs. Use the new EXPO and DROID sources together; a main-worktree venv may have
+an editable DROID path pointing to the old source, so explicitly set PYTHONPATH.
+
+```bash
+source /scr/kevinon/env.sh
+export PYTHONPATH="$PWD/client/droid:$PWD:$PWD/tests"
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
+client/.venv/bin/python -m unittest discover -s client/tests -p 'test_*.py'
+client/.venv/bin/python -m unittest tests.test_robot_eval tests.test_split_reset_overlap_isolated tests.test_async_video_isolated tests.test_rollout_dashboard_isolated
+PYTHONPATH="$PWD/tests/cpu:$PYTHONPATH" client/.venv/bin/python -m unittest discover -s tests/cpu -p 'test_sft_eval.py'
+```
+
+Validation on 2026-10-02: 96 client tests, 49 eval/reset/video/dashboard tests,
+and 5 SFT converter/eval parity tests passed without devices or GPUs. Synthetic
+SDK tests cover selected-eye reads, capture settings, and retrieval failure.
+Synthetic RPCs check policy/human actions and timestamps; simulated rounds check
+chunk provenance for one/two robots. This establishes correctness of those paths,
+not actual camera throughput or physical control latency. Camera access remains
+prohibited until explicitly authorized.
+
+Read-only selection preview (does not enumerate or open cameras):
+
+```bash
+client/.venv/bin/python scripts/multi_robot/benchmark_camera_latency.py \
+  --dry-run --resolution 720p --fps 30 --camera-count 4 --selected-eyes
+```

@@ -43,7 +43,13 @@ def prepare_images(raw, camera_ids, crops, resolutions, image_size):
             K = np.array(intrinsics[camera_id], dtype=np.float64, copy=True)
             K[0, 2] -= x; K[1, 2] -= y
             if image_size is not None:
-                K[0, :] *= image_size[1]/frame.shape[1]
-                K[1, :] *= image_size[0]/frame.shape[0]
+                # Match openpi_client.image_tools.resize_with_pad, including
+                # integer resized dimensions and centered letterboxing.
+                ratio = max(frame.shape[1]/image_size[1], frame.shape[0]/image_size[0])
+                width, height = int(frame.shape[1]/ratio), int(frame.shape[0]/ratio)
+                K[0, :] *= width/frame.shape[1]
+                K[1, :] *= height/frame.shape[0]
+                K[0, 2] += (image_size[1]-width)//2
+                K[1, 2] += (image_size[0]-height)//2
             intrinsics[camera_id] = K
     return images, intrinsics

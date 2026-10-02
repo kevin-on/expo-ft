@@ -124,7 +124,7 @@ class AsyncCollectionTests(unittest.TestCase):
             return {'value': obs['value']}
 
         env.step.side_effect = step
-        flags = SimpleNamespace(save_right_images=True, video_save_width=320, video_save_height=180)
+        flags = SimpleNamespace(save_right_images=True, video_save_width=320, video_save_height=180, video_encoder_threads=2)
         with tempfile.TemporaryDirectory(dir='/scr/kevinon/tmp') as tmp, \
              patch.object(collect, 'FLAGS', flags), \
              patch.object(collect, 'collection_observation', side_effect=transform), \

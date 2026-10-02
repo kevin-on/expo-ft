@@ -44,7 +44,7 @@ class CollectDiscardTests(unittest.TestCase):
     def test_discard_closes_then_removes_only_attempt_and_retry_resets(self):
         flags = SimpleNamespace(test_detector=False, keep_vertical=False,
                                 save_right_images=True, video_save_width=320,
-                                video_save_height=180, num_episodes=1)
+                                video_save_height=180, video_encoder_threads=2, num_episodes=1)
         env, controller, keys = Mock(), Mock(), Mock()
         env.control_hz = 10
         env.get_raw_observation.side_effect = lambda: {'timestamp': {}}
@@ -57,7 +57,7 @@ class CollectDiscardTests(unittest.TestCase):
         events = []
 
         class Recorder:
-            def __init__(self, env, filepath, folder, *args):
+            def __init__(self, env, filepath, folder, *args, **kwargs):
                 self.path = Path(filepath)
                 self.path.write_bytes(b'partial hdf5')
                 mp4 = self.path.parent / 'recordings/MP4/wrist.mp4'

@@ -25,7 +25,7 @@ class CollectionVideoTests(unittest.TestCase):
         controller.get_info.return_value = {'movement_enabled': True}
         controller.forward.return_value = (np.zeros(7), {})
         env.step.return_value = {'cartesian_velocity': np.zeros(6), 'gripper_velocity':0}
-        fake_flags = SimpleNamespace(save_right_images=True, video_save_width=320, video_save_height=180)
+        fake_flags = SimpleNamespace(save_right_images=True, video_save_width=320, video_save_height=180, video_encoder_threads=2)
         with patch.object(collect,'FLAGS',fake_flags), \
              patch.object(collect,'collection_observation',return_value={'exterior_image_1_left':small}), \
              patch.object(collect.h5py,'File',return_value=hdf5), \

@@ -118,10 +118,10 @@ def worker(index, config_path, serials, args, barrier, messages):
         from droid.camera_utils.camera_readers import zed_camera
         from droid.camera_utils.wrappers.multi_camera_wrapper import MultiCameraWrapper
         width, height = (1280, 720) if args.resolution == '720p' else (1920, 1080)
-        zed_camera.standard_params['camera_resolution'] = (
-            sl.RESOLUTION.HD720 if args.resolution == '720p' else sl.RESOLUTION.HD1080)
-        zed_camera.standard_params['camera_fps'] = args.fps
         config = json.loads(Path(config_path).read_text())
+        for role in ('hand_camera', 'varied_camera', 'static_camera'):
+            settings = config.setdefault('camera_kwargs', {}).setdefault(role, {})
+            settings.update(capture_resolution=args.resolution, camera_fps=args.fps)
         wrapper = MultiCameraWrapper(config.get('camera_kwargs', {}), serials,
                                      config['wrist_camera_serial'])
         if set(wrapper.camera_dict) != set(serials):
