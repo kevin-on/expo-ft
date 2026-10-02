@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -19,6 +20,14 @@ def payload(step='10', value=1):
 
 
 class EnvelopeTest(unittest.TestCase):
+    def test_receiver_tui_displays_shared_rollout_metrics(self):
+        with tempfile.TemporaryDirectory() as folder:
+            session=Session(None,folder,validator=lambda *_:None)
+            worker=SimpleNamespace(status=dict(phase='Eval',max_steps=80,robots={0:dict(
+                status='running',steps=5,episodes=1,successes=1,last=True,
+                rollout_hz=9.8,frame_age_ms={'side':120.,'wrist':125.})}))
+            self.assertIn('9.8 Hz | Frame age S/W: 120/125 ms','\n'.join(lines(session,worker,30)))
+
     def test_legacy_step_and_file_load_without_rewriting(self):
         with tempfile.TemporaryDirectory() as folder, payload() as b:
             path = save(b, folder)

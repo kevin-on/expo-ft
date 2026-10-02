@@ -2,6 +2,7 @@
 import argparse
 import importlib.util
 import json
+import logging
 import os
 from pathlib import Path
 import select
@@ -30,6 +31,8 @@ def run(sock, base, payload, options):
     task = task_config(options['task'])
     meta = manifest(payload)['metadata']
     output = Path(options['output'])
+    # stdout/stderr are already redirected to this eval's logs/eval.log.
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     expected = {k:getattr(task,k) for k in ('auto_reset_steps','control_hz','action_space','gripper_action_space','language_instruction')}
     requests = {}
     config_dir=output/'config'

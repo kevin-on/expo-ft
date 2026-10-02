@@ -86,6 +86,44 @@ boundary, but do not claim chunk provenance timing until their asynchronous plan
 explicitly carry this metadata; the split/colocated round and coordinated eval
 paths implement it.
 
+## Shared rollout logs and TUI
+
+Coordinated eval (direct and receiver) and split/colocated Online FT use
+`expo_ft/env/rollout_timing.py` for step records, live metrics and formatting:
+
+`RolloutMetrics` owns both Hz history and frame ages, without a separate rate
+class. Online delivers each completed step's transition and timing together via
+`on_transition(robot, step, transition, timing)`; the runner sends only the
+transition to replay and passes timing directly to the dashboard.
+
+```text
+9.8 Hz | Frame age S/W: 120/125 ms
+```
+
+- Hz is recent completed **control steps**, across ten intervals, including
+  inference, RPCs and control-period waits. It is not camera or pure inference Hz.
+  It decays during stalls and resets at the next episode/round.
+- S/W are the latest completed action's side/wrist frame ages at WS command
+  dispatch. They retain the action chunk's original observation. They do not
+  increase on TUI refresh and are not the next observation's buffer-selection age.
+- Human control still counts for Hz, but has no policy frame age. Missing
+  timestamps and handoff polls display `—`; all metrics are hidden while idle,
+  resetting or waiting for an update.
+
+Both loops emit `[timing][rollout step]` JSON records with mode, robot, episode
+(eval) or round (online), step, planning time, action RPC time, observation RPC
+time, observation breakdown and WS action frame timing. `plan_ms` includes the
+policy queue/lock wait. `observation_ms` measures the **next** observation after
+this action; `action_frame_timing` refers to the frame used for this action.
+RPC intervals use inference-host monotonic time; WS computes frame ages locally.
+No cross-machine timestamp subtraction is used.
+
+Eval keeps these same step records in `episodes.jsonl` as well as its eval log
+(`logs/eval.log` for receiver eval, `eval.log` for direct eval). Online uses the
+existing inference/`--rollout_log` destination. Telemetry is not inserted into
+replay or sent to the learner. This adds no RPCs or device reads and does not
+change action selection, rollout ordering or checkpointed training metrics.
+
 ## Companion revisions and device-free checks
 
 DROID companion branch: `camera-observation-runtime`. Deploy its current checkout,
@@ -114,6 +152,12 @@ Synthetic RPCs check policy/human actions and timestamps; simulated rounds check
 chunk provenance for one/two robots. This establishes correctness of those paths,
 not actual camera throughput or physical control latency. Camera access remains
 prohibited until explicitly authorized.
+
+Subsequent shared-telemetry validation: 101 client tests and 46 targeted
+eval/round/dashboard/formatter tests passed (147 total). The full remote eval
+RAM suite could not pass in the WS client interpreter because it lacks Linux
+sealing constants; its receiver TUI formatting test passed independently. See
+`tests/README.md` for isolated test dependencies and the focused command.
 
 Read-only selection preview (does not enumerate or open cameras):
 

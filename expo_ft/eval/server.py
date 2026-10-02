@@ -15,6 +15,7 @@ import uuid
 
 from expo_ft.distributed.buffer import send_packet, receive_packet
 from expo_ft.distributed.channel import Channel
+from expo_ft.env.rollout_timing import format_rollout_metrics
 from .checkpoint import load_base, manifest, location, read_file, save, BaseIdentity, within, weights_path, WEIGHTS_NAME, LEGACY_WEIGHTS_NAME
 
 
@@ -258,9 +259,9 @@ def lines(session, worker, episodes):
         for r,state in status.get('robots',{}).items():
             last='—' if state['last'] is None else 'SUCCESS' if state['last'] else 'FAIL'
             rate=f"{100*state['successes']/state['episodes']:.1f}%" if state['episodes'] else '—'
-            hz = '—' if state.get('rollout_hz') is None else f"{state['rollout_hz']:.1f}"
             result.append(f"Robot {r}  {state['status']:<18}  {state['steps']:3}/{status['max_steps']} steps"
-                          f"   {hz} Hz   {state['successes']}/{state['episodes']} ({rate})   last {last}")
+                          f"   {state['successes']}/{state['episodes']} ({rate})   last {last}")
+            result.append('       ' + format_rollout_metrics(state))
         result += ['','[0/1] Start robot  [Space] Start both  [r/t] Reset READY robot 0/1  [Esc] End eval']
     else:
         gpu = 'Starting eval' if s['mode']=='eval' else 'GPU released'

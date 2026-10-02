@@ -7,7 +7,7 @@ import time
 
 import numpy as np
 from expo_ft.env.model_frame import model_inputs
-from expo_ft.env.rollout_rate import RolloutRate
+from expo_ft.env.rollout_timing import RolloutMetrics, step_timing, log_step_timing
 
 
 class RobotEvaluation:
@@ -25,19 +25,19 @@ class RobotEvaluation:
         self.by_robot, self.barriers = {}, []
         self.results = queue.SimpleQueue()
         self.states = {r: dict(status='waiting', steps=0, episodes=0, successes=0, last=None) for r in envs}
-        self.rates = {r: RolloutRate() for r in envs}
+        self.metrics = {r: RolloutMetrics() for r in envs}
 
     def snapshot(self):
         with self.lock:
-            return {r: dict(s, rollout_hz=self.rates[r].hz() if s['status']=='running' else None)
+            return {r: dict(s, **self.metrics[r].snapshot(active=s['status']=='running'))
                     for r,s in self.states.items()}
 
-    def state(self, robot, **values):
+    def state(self, robot, *, timing=None, **values):
         with self.lock:
             if values.get('status') == 'starting':
-                self.rates[robot].reset()
+                self.metrics[robot].reset()
             elif values.get('status') == 'running' and 'steps' in values:
-                self.rates[robot].step()
+                self.metrics[robot].step(timing=timing)
             self.states[robot].update(values)
 
     def check(self):
@@ -153,16 +153,12 @@ class RobotEvaluation:
                 arrived = time.monotonic()
                 done, success, reward, _ = env.get_info_for_step()
                 episode_return += float(reward)
-                timings.append(dict(step=step, dispatch=dispatched, plan_ms=plan_ms,
-                    action_rpc_ms=(acted-dispatched)*1000,
-                    observation_ms=(arrived-acted)*1000,
-                    observation_age_ms=(dispatched-observed)*1000,
-                    policy_observation_age_ms=(dispatched-policy_observed)*1000))
-                timings[-1]['action_frame_timing'] = getattr(env, 'get_action_timing', lambda: {})()
-                get_timing = getattr(env, 'get_observation_timing', None)
-                if get_timing is not None:
-                    timings[-1]['observation_breakdown'] = get_timing()
-                self.state(robot, status='running', steps=step)
+                timing = step_timing(env, step=step, source=source, observed=observed,
+                    policy_observed=policy_observed, dispatched=dispatched, acted=acted,
+                    arrived=arrived, plan_ms=plan_ms)
+                timings.append(timing)
+                log_step_timing(timing, mode='eval', robot=robot, episode=number)
+                self.state(robot, status='running', steps=step, timing=timing)
                 previous, observed, plan_ms = dispatched, arrived, 0.
                 if done:
                     break

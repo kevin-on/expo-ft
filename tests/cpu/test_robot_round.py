@@ -90,7 +90,7 @@ def test_split_handoff_filtered_but_zero_policy_and_human_actions_retained(num_r
     stream = []
     episodes = collect_round(envs, lambda _: np.zeros((8, 2)), 8, 10000,
                              mark_handoff=True,
-                             on_transition=lambda r, i, row: stream.append((r, i, row.copy())))
+                             on_transition=lambda r, i, row, timing: stream.append((r, i, row.copy())))
     for raw, (rows, success) in zip(episodes, training_round(episodes)):
         assert success and len(rows) == length - 1
         assert raw[0][2]['is_handoff']

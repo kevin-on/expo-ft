@@ -20,6 +20,7 @@ from types import SimpleNamespace as NS
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+timing_helpers = runpy.run_path(str(ROOT / 'expo_ft/env/rollout_timing.py'))
 
 
 def load_definitions(path, names, namespace):
@@ -82,6 +83,7 @@ class SplitOverlapTests(unittest.TestCase):
                 pass
         ns = dict(deque=deque, Future=Future, ThreadPoolExecutor=ThreadPoolExecutor, deepcopy=deepcopy,
                   queue=queue, threading=threading, time=time, np=NS(asarray=lambda x: x),
+                  step_timing=timing_helpers['step_timing'], log_step_timing=timing_helpers['log_step_timing'],
                   model_inputs=lambda obs: obs,
                   physical_action=lambda action, mirror: [-a for a in action] if mirror else action)
         load_definitions('expo_ft/utils/robot_round.py', ['collect_round'], ns)
@@ -225,7 +227,7 @@ class SplitOverlapTests(unittest.TestCase):
                 return [self.version], self, {}
 
         def collect(envs, sample, replan, hz, *, mirror_robot, on_transition, on_episode_end,
-                    check_session, reset_done, canonical_frame, mark_handoff):
+                    check_session, reset_done, canonical_frame, mark_handoff, round_id):
             test.assertTrue(mark_handoff)
             test.assertTrue(canonical_frame)
             test.assertTrue(reset_done)
@@ -235,7 +237,7 @@ class SplitOverlapTests(unittest.TestCase):
                 obs = env.start_episode()
                 action = sample(obs)
                 record = dict(observations=obs, actions=action, rewards=0., dones=True)
-                on_transition(env.index, 0, record)
+                on_transition(env.index, 0, record, None)
                 on_episode_end(env.index, 1, False)
 
         def receive_round(channel, session, round_id, version, count):

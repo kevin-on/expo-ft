@@ -22,7 +22,25 @@ implementation experiments. Preserve them when cleaning up measurement scripts.
 Their fakes avoid robot/GPU imports; they do not replace real-model verification.
 
 `test_rollout_dashboard_isolated.py` covers resumed counters and live transition
-display. `cpu/test_robot_round.py` checks handoff exclusion, including terminal
+display. `test_rollout_timing.py` and `client/tests/test_frame_timing.py` cover
+shared eval/online timing, clock domains, chunk provenance, human/handoff ages,
+and TUI reset/hide behavior. The receiver's metric formatting can be checked
+without RAM transport or GPU execution:
+
+```bash
+source /scr/kevinon/env.sh
+uv pip install --python client/.venv/bin/python --target /scr/kevinon/tmp/expo-telemetry-test-deps --no-deps ml_dtypes xxhash
+PYTHONPATH="/scr/kevinon/tmp/expo-telemetry-test-deps:$PWD:$PWD/tests" \
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 \
+  client/.venv/bin/python -m unittest tests.test_rollout_timing \
+  tests.test_remote_eval.EnvelopeTest.test_receiver_tui_displays_shared_rollout_metrics
+```
+
+The full remote eval suite requires an interpreter with Linux `fcntl.F_ADD_SEALS`
+and `F_SEAL_*` support; the WS client interpreter currently lacks these constants.
+Run its RAM transport/persistence tests in the matching compute runtime.
+
+`cpu/test_robot_round.py` checks handoff exclusion, including terminal
 handoffs, without dropping intentional zero actions. `distributed/test_runner.py`
 checks old/new checkpoint progress restore and handoff transport/replay cursors.
 

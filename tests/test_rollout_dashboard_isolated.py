@@ -12,12 +12,13 @@ from unittest.mock import patch
 from contextlib import redirect_stdout
 import io
 
-from test_split_reset_overlap_isolated import ROOT, load_definitions
+from test_split_reset_overlap_isolated import ROOT, load_definitions, timing_helpers
 
 Dashboard = runpy.run_path(str(ROOT / 'expo_ft/utils/rollout_dashboard.py'))['RolloutDashboard']
 Progress = runpy.run_path(str(ROOT / 'expo_ft/utils/rollout_dashboard.py'))['RolloutProgress']
 namespace = dict(deque=deque, Future=Future, ThreadPoolExecutor=ThreadPoolExecutor,
                  deepcopy=deepcopy, queue=queue, threading=threading, time=time,
+                 step_timing=timing_helpers['step_timing'], log_step_timing=timing_helpers['log_step_timing'],
                  np=NS(asarray=lambda x: x))
 load_definitions('expo_ft/utils/robot_round.py', ['collect_round'], namespace)
 collect_round = namespace['collect_round']
@@ -27,18 +28,18 @@ class DashboardTests(unittest.TestCase):
     def test_hz_display_includes_human_control_and_resets_each_round(self):
         ui = Dashboard(2, 80)
         ui.ready(0, 0)
-        with patch('expo_ft.env.rollout_rate.time.monotonic', return_value=0):
+        with patch('expo_ft.env.rollout_timing.time.monotonic', return_value=0):
             ui.step(0, 1, False)
-        with patch('expo_ft.env.rollout_rate.time.monotonic', return_value=.2):
+        with patch('expo_ft.env.rollout_timing.time.monotonic', return_value=.2):
             ui.step(0, 2, True)
             output = io.StringIO()
             with redirect_stdout(output): ui.draw()
             self.assertIn('Hz', output.getvalue())
             self.assertIn('5.0', output.getvalue())
             self.assertIn('human', output.getvalue())
-            self.assertIsNone(ui.rates[1].hz())
+            self.assertIsNone(ui.metrics[1].hz())
             ui.ready(1, 1)
-            self.assertIsNone(ui.rates[0].hz())
+            self.assertIsNone(ui.metrics[0].hz())
 
     def test_resume_totals_continue_without_double_counting_or_counting_handoff(self):
         for robots in (1, 2):
@@ -207,7 +208,7 @@ class DashboardTests(unittest.TestCase):
             envs = [Env(0), Env(1)]
             result = pool.submit(collect_round, envs, lambda obs: [[1.]], 1, 10000,
                 reset_done=True, wait_for_start=lambda r, stop: ui.wait_for_start(r, stop, envs[r].reset_only), check_session=ui.check,
-                on_transition=lambda r, s, record: ui.step(r, s + 1, record['is_hil']), on_episode_end=end)
+                on_transition=lambda r, s, record, timing: ui.step(r, s + 1, record['is_hil'], timing=timing), on_episode_end=end)
             try:
                 self.assertFalse(frames[0].wait(.03))
                 self.assertFalse(frames[1].is_set())

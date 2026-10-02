@@ -423,10 +423,11 @@ def run_inference(flags, agent=None, env_factory=None, *, channel=None,
                 nonlocal agent
                 actions, agent, _ = agent.sample_actions(observation)
                 return np.asarray(jax.device_get(actions))
-            def transition(robot, step, record):
+            def transition(robot, step, record, timing):
                 channel.send('transition', key(session, round_id, robot, step), {'version': version, 'transition': record})
                 if dashboard is not None:
-                    dashboard.step(robot, step + 1, record['is_hil'], trainable=not record.get('is_handoff', False))
+                    dashboard.step(robot, step + 1, record['is_hil'], trainable=not record.get('is_handoff', False),
+                                   timing=timing)
             def end(robot, length, success):
                 channel.send('episode_end', key(session, round_id, robot), {'version': version, 'length': length, 'success': bool(success)})
                 if dashboard is not None:
@@ -436,6 +437,7 @@ def run_inference(flags, agent=None, env_factory=None, *, channel=None,
             collect_round(envs, sample, flags.replan_steps, flags.config_task.control_hz,
                           mirror_robot=mirror_robot, on_transition=transition, on_episode_end=end,
                           check_session=check_session, reset_done=True, canonical_frame=True, mark_handoff=True,
+                          round_id=round_id,
                           **({'wait_for_start': wait_for_start} if dashboard is not None else {}))
             if dashboard is not None:
                 dashboard.set_phase('Round complete; waiting for learner / replay')

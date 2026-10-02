@@ -309,7 +309,7 @@ class ValidationTest(unittest.TestCase):
             np.testing.assert_array_equal(obs['wrist_image_left'], original['wrist_image_left'])
             return np.ones((2, 7))
         result = collect_round([Env(0), Env(1)], sample, 2, 100000, mirror_robot=1,
-            on_transition=lambda r, s, t: streamed.setdefault((r, s), t),
+            on_transition=lambda r, s, t, timing: streamed.setdefault((r, s), t),
             on_episode_end=lambda r, n, ok: ends.setdefault(r, (n, ok)))
         self.assertEqual(ends, {0: (2, True), 1: (2, False)})
         for robot, (records, _) in enumerate(result):

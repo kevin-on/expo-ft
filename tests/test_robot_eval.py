@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 from expo_ft.env.robot_eval import RobotEvaluation
-from expo_ft.env.rollout_rate import RolloutRate
+from expo_ft.env.rollout_timing import RolloutMetrics
 from expo_ft.env.sft_eval import validate_eval_task
 
 
@@ -35,7 +35,7 @@ def wait_for(test):
 
 class EvalTest(unittest.TestCase):
     def test_rollout_hz_tracks_recent_intervals_stalls_and_episode_reset(self):
-        rate = RolloutRate()
+        rate = RolloutMetrics()
         self.assertIsNone(rate.hz(0))
         rate.step(0)
         self.assertIsNone(rate.hz(0))
@@ -54,10 +54,10 @@ class EvalTest(unittest.TestCase):
         session = RobotEvaluation({0:Env(), 1:Env()}, lambda _:np.zeros((2,7)),
             replan_steps=2,control_hz=10,max_steps=2)
         try:
-            with patch('expo_ft.env.rollout_rate.time.monotonic', return_value=0):
+            with patch('expo_ft.env.rollout_timing.time.monotonic', return_value=0):
                 session.state(0, status='starting')
                 session.state(0, status='running', steps=1)
-            with patch('expo_ft.env.rollout_rate.time.monotonic', return_value=.2):
+            with patch('expo_ft.env.rollout_timing.time.monotonic', return_value=.2):
                 session.state(0, status='running', steps=2)
                 self.assertAlmostEqual(session.snapshot()[0]['rollout_hz'], 5)
                 self.assertIsNone(session.snapshot()[1]['rollout_hz'])

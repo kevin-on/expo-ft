@@ -9,11 +9,12 @@ import time
 import numpy as np
 
 from expo_ft.env.model_frame import model_inputs
+from expo_ft.env.rollout_timing import step_timing, log_step_timing
 
 
 def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=None,
                   on_transition=None, on_episode_end=None, check_session=None, *, reset_done=False,
-                  wait_for_start=None, canonical_frame=False, mark_handoff=False):
+                  wait_for_start=None, canonical_frame=False, mark_handoff=False, round_id=None):
     """Return episodes in robot order. No reset or inference survives this barrier.
 
     Workers perform RPCs concurrently and submit inference requests to one queue.
@@ -28,6 +29,8 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
     for each robot. Waiting workers do not block the other robot's inference.
     mark_handoff tags the human-to-policy zero poll for split replay filtering;
     it remains in the control stream, including terminal information.
+    on_transition receives (robot, step, transition, timing) once per completed
+    step. Timing stays separate from the replay record.
     """
     requests = queue.Queue()
     stopped = threading.Event()
@@ -48,6 +51,8 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
         if stopped.is_set():
             return None
         observation = env.start_episode() if reset_done else env.reset()
+        observed = time.monotonic()
+        policy_observed = None
         if canonical:
             observation = model_inputs(observation)
         plan = deque()
@@ -56,8 +61,10 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
         action_type = "policy"
         last_dispatch = None
         while not stopped.is_set():
+            plan_ms = 0.
             if not plan and action_type != "human":
                 plan_metadata = getattr(env, 'get_observation_metadata', lambda: None)()
+                planning = time.monotonic()
                 response = Future()
                 requests.put((deepcopy(observation), response))
                 while not response.done():
@@ -66,6 +73,8 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
                 if stopped.is_set():
                     return None
                 plan.extend(response.result()[:replan_steps])
+                plan_ms = (time.monotonic() - planning) * 1000
+                policy_observed = observed
             # Observation, RPC and inference time are part of the control period.
             # Anchor each period to the previous actual dispatch, with no catch-up burst.
             if last_dispatch is not None:
@@ -81,12 +90,18 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
             if set_metadata is not None:
                 set_metadata(plan_metadata if has_action else None)
             action, action_type = env.step(command)
+            acted = time.monotonic()
             if action_type == "human":
                 plan.clear()
             next_observation = env.get_observation()
+            arrived = time.monotonic()
             if canonical:
                 next_observation = model_inputs(next_observation)
             done, success, reward, mask = env.get_info_for_step()
+            timing = step_timing(env, step=len(transitions)+1, source=action_type,
+                observed=observed, policy_observed=policy_observed if has_action else None,
+                dispatched=last_dispatch, acted=acted, arrived=arrived, plan_ms=plan_ms)
+            log_step_timing(timing, mode='online', robot=index, round_id=round_id)
             transitions.append(dict(
                 observations=observation, actions=action, rewards=reward,
                 masks=mask, dones=done, is_hil=action_type == "human",
@@ -94,8 +109,9 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
             if mark_handoff and not has_action and action_type != "human":
                 transitions[-1]['is_handoff'] = True
             if on_transition is not None:
-                on_transition(index, len(transitions) - 1, transitions[-1])
+                on_transition(index, len(transitions) - 1, transitions[-1], timing)
             observation = next_observation
+            observed = arrived
             if done:
                 if on_episode_end is not None:
                     on_episode_end(index, len(transitions), success)
