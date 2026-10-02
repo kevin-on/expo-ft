@@ -3,6 +3,10 @@
 Robot JSONs select physical camera serials and eyes with `side_camera_id` and
 `wrist_camera_id`. Only those eyes are retrieved for online/eval. Collection can
 explicitly request both eyes; its stored pose/actions remain physical coordinates.
+Policy view serials also restrict physical camera initialization. If
+`camera_serials` is supplied, only its intersection with the selected views is
+opened; this preserves the exclusion of virtual/blank cameras. Without a view
+selection, collection retains its explicit camera list and both-eye settings.
 `camera_kwargs.hand_camera` / `varied_camera` accept `capture_resolution`
 (`720p`, `1080p`) and `camera_fps` (15/30; 720p also 60). Defaults in the reader
 remain 1080p/15 for callers without explicit configuration.
@@ -27,6 +31,9 @@ only the parent repository while leaving an older DROID checkout installed.
 inputs horizontally. `model_frame.mirror_robot_coordinates` reflects Y/roll/yaw
 for both Cartesian observations and policy actions. Configure all three true for
 robot1 and false for robot0 to reproduce the existing mixed dataset convention.
+All three booleans are required at WS environment creation, including explicit
+false values. Missing/partial settings are rejected before constructing the
+environment; old robot JSONs cannot silently disable robot1 reflection.
 `ModelFrame` owns the live transformation; ILIAD consumes already canonical data.
 Human commands execute physically, then their actual/clipped actions are reflected
 back for replay. Reset, bounds, raw video and collection HDF5 stay physical.
@@ -51,6 +58,9 @@ Reset sets a minimum SDK frame timestamp; no pre-reset frame passes that barrier
 Missing, stale, future-dated or failed frames surface an error rather than silently
 running on old pixels. SDK timestamps are host-reception time, not sensor exposure
 start. Hardware mode changes/recording stop the producer before touching the SDK.
+If one parallel camera read fails, the producer waits for every submitted read
+to finish before exiting. A stuck read makes shutdown time out without allowing
+a concurrent SDK mode change or camera release.
 SVO recording reads synchronously. Collection also disables this cache explicitly.
 
 ## Frame-to-action timing
@@ -78,7 +88,8 @@ paths implement it.
 
 ## Companion revisions and device-free checks
 
-DROID companion branch: `camera-observation-runtime`, revision `d717f4fd0e248c08474f853af1c59fc28437a1a6`.
+DROID companion branch: `camera-observation-runtime`. Deploy its current checkout,
+including the camera-selection and read-draining fixes, with this EXPO checkout.
 OpenPI is unchanged (validated companion `590fa99`). The feature worktree's
 client environment/source links are local conveniences, not tracked deployment
 inputs. Use the new EXPO and DROID sources together; a main-worktree venv may have
@@ -90,12 +101,15 @@ export PYTHONPATH="$PWD/client/droid:$PWD:$PWD/tests"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
 client/.venv/bin/python -m unittest discover -s client/tests -p 'test_*.py'
 client/.venv/bin/python -m unittest tests.test_robot_eval tests.test_split_reset_overlap_isolated tests.test_async_video_isolated tests.test_rollout_dashboard_isolated
-PYTHONPATH="$PWD/tests/cpu:$PYTHONPATH" client/.venv/bin/python -m unittest discover -s tests/cpu -p 'test_sft_eval.py'
+PYTHONPATH="$PWD/tests/cpu:$PYTHONPATH" client/.venv/bin/python -m unittest test_sft_eval test_mirror_online
 ```
 
-Validation on 2026-10-02: 96 client tests, 49 eval/reset/video/dashboard tests,
-and 5 SFT converter/eval parity tests passed without devices or GPUs. Synthetic
+Validation on 2026-10-02: 100 client tests, 49 eval/reset/video/dashboard tests,
+and 7 SFT/online converter parity tests passed without devices or GPUs. Synthetic
 SDK tests cover selected-eye reads, capture settings, and retrieval failure.
+They also check unused-camera exclusion and that a failed parallel read cannot
+permit a mode change while another read is active. WS creation tests reject
+missing/partial mirror settings before hardware construction.
 Synthetic RPCs check policy/human actions and timestamps; simulated rounds check
 chunk provenance for one/two robots. This establishes correctness of those paths,
 not actual camera throughput or physical control latency. Camera access remains

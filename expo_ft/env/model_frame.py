@@ -16,13 +16,21 @@ def model_inputs(observation):
 
 
 class ModelFrame:
-    def __init__(self, config=None):
+    def __init__(self, config=None, *, require_explicit=False):
         config = config or {}
         if set(config) - {'mirror_images', 'mirror_robot_coordinates'}:
             raise ValueError('Unknown model_frame setting')
         images = config.get('mirror_images', {})
         if set(images) - {'side', 'wrist'}:
             raise ValueError('mirror_images accepts side and wrist')
+        if require_explicit and (
+            'mirror_robot_coordinates' not in config or set(images) != {'side', 'wrist'}
+        ):
+            raise ValueError(
+                'Set model_frame.mirror_images.side, model_frame.mirror_images.wrist, '
+                'and model_frame.mirror_robot_coordinates explicitly in the robot config '
+                '(use false when no reflection is needed)'
+            )
         self.side = images.get('side', False)
         self.wrist = images.get('wrist', False)
         self.coordinates = config.get('mirror_robot_coordinates', False)

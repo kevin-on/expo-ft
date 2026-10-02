@@ -294,7 +294,7 @@ async def _handle_environment_request(websocket):
                     coordinated_eval = env_usage == "eval" and request.get("coordinated_eval", False)
                     if (env_usage == "train" or coordinated_eval) and request.get("async_video", False):
                         env_kwargs["async_video"] = True
-                    frame = ModelFrame(task_config.get('model_frame'))
+                    frame = ModelFrame(task_config.get('model_frame'), require_explicit=True)
                     env = task_config.env(**env_kwargs)
                     env._model_frame = frame
                     _env_storage[env_id] = env

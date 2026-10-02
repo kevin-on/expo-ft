@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from expo_ft.env.sft_eval import validate_camera_views
+from expo_ft.env.model_frame import ModelFrame
 # Load this NumPy-only module directly, avoiding utils/__init__'s unrelated JAX imports.
 spec = importlib.util.spec_from_file_location("mirror_test_robot_round", ROOT / "expo_ft/utils/robot_round.py")
 robot_round = importlib.util.module_from_spec(spec)
@@ -32,6 +33,7 @@ class MirrorOnlineTests(unittest.TestCase):
             def __init__(self, robot):
                 self.robot = robot
                 self.config = json.loads((ROOT / f"configs/robots/robot-{robot}.json").read_text())
+                self.frame = ModelFrame(self.config['model_frame'], require_explicit=True)
                 self.samples, self.executed, self.commands = [], [], []
             def reset(self):
                 self.index = 0
@@ -44,10 +46,13 @@ class MirrorOnlineTests(unittest.TestCase):
                 side = obs['exterior_image_1_' + self.config['side_camera_id'].rsplit('_', 1)[1]]
                 obs.update(exterior_image_1_left=side, exterior_image_2_left=side,
                            wrist_image_left=obs['wrist_image_' + self.config['wrist_camera_id'].rsplit('_', 1)[1]])
-                return obs
+                return self.frame.observation(obs)
             def step(self, command):
-                self.commands.append(np.array(command))
-                executed = np.array(command)
+                # Emulate the WS boundary: dispatch physical commands and return
+                # actual (including human/clipped) actions in model coordinates.
+                physical = self.frame.action(command)
+                self.commands.append(physical.copy())
+                executed = physical.copy()
                 human = self.index == 1
                 if human:
                     executed = np.array([.1, .2, .3, .4, .5, .6, -1.])
@@ -55,7 +60,7 @@ class MirrorOnlineTests(unittest.TestCase):
                     executed[1] = 0  # simulate physical workspace clipping
                 self.executed.append(executed.copy())
                 self.index += 1
-                return executed, 'human' if human else 'policy'
+                return self.frame.action(executed), 'human' if human else 'policy'
             def get_info_for_step(self):
                 done = self.index == 4
                 return done, done, float(done), float(not done)

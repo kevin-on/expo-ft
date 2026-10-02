@@ -7,6 +7,62 @@ from droid.camera_utils.wrappers.latest_frame import LatestFrame
 from client.envs.camera_config import prepare_images
 
 class BufferTests(unittest.TestCase):
+    def test_failed_read_waits_for_other_camera_before_mode_change(self):
+        from droid.camera_utils.wrappers.multi_camera_wrapper import MultiCameraWrapper
+        from unittest.mock import Mock
+        entered, failed, release = threading.Event(), threading.Event(), threading.Event()
+        failure = ValueError('camera disconnected')
+
+        def slow_read():
+            entered.set()
+            release.wait(2)
+            return {'image': {}}, {'s_frame_received': time.time_ns()/1e6}
+
+        def failing_read():
+            entered.wait(1)
+            failed.set()
+            raise failure
+
+        w = MultiCameraWrapper.__new__(MultiCameraWrapper)
+        w._latest = w._executor = w._buffer_settings = w._processor = None
+        w._recording = w._calibrating = False
+        w.camera_dict = {name: Mock(high_res_calibration=False) for name in ('s', 'w')}
+        for camera in w.camera_dict.values():
+            camera.is_running.return_value = True
+        w.camera_dict['s'].read_camera.side_effect = slow_read
+        w.camera_dict['w'].read_camera.side_effect = failing_read
+        w.configure_buffer(timeout=.05)
+        errors = []
+        def get():
+            try:
+                w.read_cameras()
+            except Exception as error:
+                errors.append(error)
+        reader = threading.Thread(target=get)
+        reader.start()
+        try:
+            self.assertTrue(failed.wait(1))
+            slot = w._latest
+            with self.assertRaisesRegex(TimeoutError, 'Camera reader has not stopped'):
+                w.set_trajectory_mode()
+            for camera in w.camera_dict.values():
+                camera.set_trajectory_mode.assert_not_called()
+                camera.disable_camera.assert_not_called()
+            self.assertTrue(slot.thread.is_alive())
+            release.set()
+            slot.thread.join(1)
+            reader.join(1)
+            self.assertFalse(slot.thread.is_alive())
+            self.assertIs(slot.error, failure)
+            self.assertTrue(errors)
+            w.set_trajectory_mode()
+            for camera in w.camera_dict.values():
+                camera.set_trajectory_mode.assert_called_once()
+        finally:
+            release.set()
+            reader.join(1)
+            w.disable_cameras()
+
     def test_reads_dont_grab_and_reset_waits_for_new_timestamp(self):
         calls=[];release=threading.Event()
         def read():

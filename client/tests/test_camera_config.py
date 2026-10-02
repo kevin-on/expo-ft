@@ -19,6 +19,58 @@ class CameraConfigTests(unittest.TestCase):
 if __name__ == '__main__': unittest.main()
 
 class ReaderTests(unittest.TestCase):
+    def test_physical_camera_selection_precedes_initialization(self):
+        from unittest.mock import Mock, patch
+        from droid.camera_utils.wrappers.multi_camera_wrapper import MultiCameraWrapper
+        views = {'s': ['right'], 'w': ['left']}
+        cases = [(None, ['s', 'w']), (['s', 'w', 'unused'], ['s', 'w']),
+                 (['s', 'unused'], ['s']), ([], [])]
+        for serials, expected in cases:
+            with self.subTest(serials=serials):
+                cameras = {name: Mock(serial_number=name, is_hand_camera=name == 'w',
+                                      high_res_calibration=False)
+                           for name in ('s', 'w', 'unused')}
+                def discover(selected, wrist):
+                    # Fake discovery includes another attached camera, but honors
+                    # the requested physical serials like gather_zed_cameras.
+                    return [cam for name, cam in cameras.items()
+                            if selected is None or name in selected]
+                with patch('droid.camera_utils.wrappers.multi_camera_wrapper.gather_zed_cameras',
+                           side_effect=discover) as gather, \
+                     patch('droid.camera_utils.wrappers.multi_camera_wrapper.get_camera_type',
+                           return_value='varied_camera'):
+                    wrapper = MultiCameraWrapper(camera_serials=serials,
+                                                 wrist_camera_serial='w', camera_views=views)
+                    try:
+                        gather.assert_called_once_with(expected, 'w')
+                        self.assertEqual(set(wrapper.camera_dict), set(expected))
+                        for name, camera in cameras.items():
+                            if name in expected:
+                                camera.set_reading_parameters.assert_called_once_with(views=views[name])
+                                camera.set_trajectory_mode.assert_called_once()
+                            else:
+                                camera.set_reading_parameters.assert_not_called()
+                                camera.set_trajectory_mode.assert_not_called()
+                    finally:
+                        wrapper.disable_cameras()
+
+    def test_no_view_selection_preserves_collection_cameras(self):
+        from unittest.mock import Mock, patch
+        from droid.camera_utils.wrappers.multi_camera_wrapper import MultiCameraWrapper
+        cameras = [Mock(serial_number=name, is_hand_camera=name == 'w', high_res_calibration=False)
+                   for name in ('s', 'w')]
+        with patch('droid.camera_utils.wrappers.multi_camera_wrapper.gather_zed_cameras',
+                   return_value=cameras) as gather, \
+             patch('droid.camera_utils.wrappers.multi_camera_wrapper.get_camera_type',
+                   return_value='varied_camera'):
+            wrapper = MultiCameraWrapper(camera_serials=['s', 'w'], wrist_camera_serial='w')
+            try:
+                gather.assert_called_once_with(['s', 'w'], 'w')
+                for camera in cameras:
+                    camera.set_reading_parameters.assert_called_once_with()
+            finally:
+                wrapper.disable_cameras()
+
     def test_right_only_uses_requested_resolution_and_fps(self):
         from unittest.mock import Mock
         from droid.camera_utils.camera_readers.zed_camera import ZedCamera, sl
