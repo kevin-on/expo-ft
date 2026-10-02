@@ -117,13 +117,13 @@ class DroidEnv(RobotEnv):
         """Override in subclasses to e.g. reset detector sequence and move_up before reset."""
         pass
 
-    def get_info_for_step(self, raw_obs=None):
+    def get_info_for_step(self, raw_obs=None, *, manual_override=None):
         if raw_obs is None:
             raw_obs = self.prev_obs
         time_stop = self.auto_reset_due()
         reached_boundary = self.reached_boundary(raw_obs)
 
-        manual = success_detector_manual()
+        manual = success_detector_manual() if manual_override is None else manual_override
         if manual == "success":
             done, success, manual_stop = True, True, True
         elif manual == "reset":
@@ -365,8 +365,8 @@ class PickBlocksEnv(DroidEnv):
             self._recording_pending = False
         return super().step(action)
 
-    def get_info_for_step(self, raw_obs=None):
-        done, success, reward, mask = super().get_info_for_step(raw_obs)
+    def get_info_for_step(self, raw_obs=None, *, manual_override=None):
+        done, success, reward, mask = super().get_info_for_step(raw_obs, manual_override=manual_override)
         if done and self._recorder is not None:
             self._hold_after_done(self.record_post_roll)  # keep the clip running past the verdict
             self._recorder.stop()

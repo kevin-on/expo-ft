@@ -166,8 +166,71 @@ ROBOT_ID=0 NUM_EPISODES=50 SAVE_ROOT=/scr/kevinon/data/NEW_COLLECTION/robot0 \
 This records new data and can move hardware. The SpaceMouse path comes from the
 JSON. Raw eye selection, image size and MP4 flags are documented in the collection
 CLI/root README; do not infer those settings from an old recording report.
-`align_side_cameras.py` displays side+wrist alignment; `test_camera_capture.py`
-checks camera streams and must not run while collection owns them.
+
+During collection, focus that robot's terminal and press **D** (no Enter) to
+discard the current rollout. The collector stops sending teleop actions, drains
+and closes its recording worker, removes only that attempt's temporary HDF5/MP4
+directory, and starts a fresh attempt with the normal configured reset. Previously
+saved episodes remain intact; discarded attempts do not consume a success ID or
+count toward `NUM_EPISODES`. **2** is an alias for discard/reset; **1** marks success.
+Keys typed during reset/file finalization are cleared before the new rollout.
+Ctrl+C exits, and the terminal's original input mode is restored. The hotkey
+requires a controlling terminal (including tmux); it is checked by the control
+loop and cannot interrupt a camera/RPC/storage operation already in progress.
+
+`scripts/align_cameras.py` opens separate **Side align** and **Wrist align**
+windows, each with robot0, robot1, and their overlay:
+
+```bash
+client/.venv/bin/python scripts/align_cameras.py
+```
+
+Run on the workstation graphical desktop. The Tk/Pillow UI reads camera serials
+and initial LEFT/RIGHT lenses from `configs/robots/robot-{0,1}.json`. Select one
+lens per robot with the radio buttons; each camera has its own horizontal mirror
+checkbox (robot1 mirrored by default). These controls affect previews only and
+never write robot configs. Side and wrist controls are independent.
+
+Opacity is robot1's percentage: 0 shows robot0, 100 shows robot1. Click or drag
+the slider, type a percentage and press Enter, use the +/- buttons or slider
+arrow keys for 1% changes, or click the 0/50/100 presets. Source previews include
+the selected mirror so they match their overlay contribution. A stale or failed
+camera pauses the overlay and is labeled in its source panel. Esc or closing
+either window releases all cameras. `--side-only` / `--wrist-only` restrict which
+pair is opened; `--flip none` starts without reflection.
+
+This viewer and `test_camera_capture.py` open cameras; do not run them while
+collection or another viewer owns the same devices. The alignment tool does not
+connect to a robot controller.
+
+To also compare each camera with a recorded dataset in the same windows:
+
+```bash
+client/.venv/bin/python scripts/align_cameras.py \
+  --dataset-root /absolute/path/to/raw-dataset
+```
+
+Dataset comparison requires an explicit `--dataset-root` (no implicit dataset).
+Without it, only the live-camera comparison is shown. The root must contain
+`robot0/success/<episode>/traj.hdf5` and `robot1/success/<episode>/traj.hdf5`.
+The first successful episode by numeric directory name supplies frame 0 for
+both side and wrist, with physical stereo images under `saved_observation/`.
+Each Side/Wrist window uses this layout:
+
+```text
+Robot0 live              | Robot1 live              | Robot0 + Robot1 overlay
+Robot0 dataset + live    | Robot1 dataset + live    | Dataset reference controls
+```
+
+All three overlays have independent opacity sliders, numeric entries and presets.
+For dataset overlays, opacity is the live-camera weight. Each robot's selected
+lens and mirror apply equally to its recorded and live image, so robot1 is not
+mirrored twice. In each window, choose an episode and zero-based frame index per
+robot, then click Load (or press Enter in the frame field). For wrist comparison,
+position the robot at the reference pose. An invalid reference blanks that
+comparison rather than retaining an old image. `--check-reference` with
+`--dataset-root` checks the initial references without opening cameras or a GUI.
+Dataset/config files are never modified.
 
 ## Verification
 

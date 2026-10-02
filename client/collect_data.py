@@ -1,7 +1,11 @@
 import json
 import os
 import shutil
+import select
+import termios
 import time
+import tty
+import tempfile
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -62,6 +66,65 @@ flags.DEFINE_bool(
 # Saved MP4 resolution (width, height); reuse resized HDF5 images.
 flags.DEFINE_integer("video_save_width", 320, "Width of saved MP4 frames.")
 flags.DEFINE_integer("video_save_height", 180, "Height of saved MP4 frames.")
+
+
+class CollectionKeys:
+    """Single owner of collection terminal input; preserve Ctrl+C and restore tty."""
+
+    def __enter__(self):
+        self.fd = None
+        self.saved = None
+        self.escape = None
+        try:
+            self.fd = os.open('/dev/tty', os.O_RDONLY | os.O_NONBLOCK)
+            self.saved = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd, termios.TCSANOW)
+        except (OSError, termios.error):
+            self.__exit__(None, None, None)
+            print('[collection] No controlling terminal; discard hotkey unavailable.')
+        else:
+            print('[collection] D: discard current rollout and reset | 1: success | 2: discard/reset | Ctrl+C: exit (no Enter needed)')
+        return self
+
+    def __exit__(self, *_):
+        if self.fd is not None:
+            try:
+                if self.saved is not None:
+                    termios.tcsetattr(self.fd, termios.TCSANOW, self.saved)
+            finally:
+                os.close(self.fd)
+                self.fd = None
+
+    def clear(self):
+        self.escape = None
+        if self.fd is not None:
+            termios.tcflush(self.fd, termios.TCIFLUSH)
+
+    def poll(self):
+        if self.fd is None or not select.select([self.fd], [], [], 0)[0]:
+            return None
+        try:
+            keys = os.read(self.fd, 4096).lower()
+        except BlockingIOError:
+            return None
+        plain = bytearray()
+        for key in keys:
+            if self.escape == 'start':
+                self.escape = 'sequence' if key in (ord('['), ord('o')) else None
+            elif self.escape == 'sequence':
+                if 0x40 <= key <= 0x7e:
+                    self.escape = None
+            elif key == 27:
+                self.escape = 'start'
+            else:
+                plain.append(key)
+        # Ignore arrow/function escape sequences (Left ends in D!). Discard
+        # takes precedence over success, even when both arrive in one read.
+        if b'd' in plain or b'2' in plain:
+            return 'discard'
+        if b'1' in plain:
+            return 'success'
+        return None  # Enter / 3 / unrelated keys never enter a blocking prompt.
 
 
 def collection_observation(env, raw_obs, save_right_images):
@@ -196,6 +259,7 @@ def collect_trajectory(
     recording_folderpath=False,
     test_detector=False,
     keep_vertical=False,
+    keys=None,
 ):
     controller.reset_state()
     env.camera_reader.set_trajectory_mode()
@@ -204,6 +268,8 @@ def collect_trajectory(
 
     t_reset0 = time.perf_counter()
     env.reset()
+    if keys is not None:
+        keys.clear()  # Ignore commands typed during reset / previous file finalization.
     print("[between-episode] env.reset()={:.2f}s (start of episode)".format(time.perf_counter() - t_reset0))
     vertical_target = None  # Re-anchor yaw from this episode's post-reset observation.
 
@@ -215,6 +281,9 @@ def collect_trajectory(
 
     try:
         while True:
+            manual = keys.poll() if keys is not None else None
+            if manual == 'discard':
+                return {'success': False, 'failure': False, 'discarded': True}
             if recorder is not None:
                 recorder.check()
             time_start = time_ms()
@@ -225,7 +294,16 @@ def collect_trajectory(
             read_camera_start = time_ms()
             obs = env.get_raw_observation()
             read_camera_end = time_ms()
-            done, success, _, _ = env.get_info_for_step(obs)
+            if keys is not None:
+                latest = keys.poll()
+                if latest == 'discard':
+                    return {'success': False, 'failure': False, 'discarded': True}
+                manual = latest or manual
+                # Collection owns tty input. Do not let the normal manual detector
+                # race this reader or block on readline while tty is in cbreak mode.
+                done, success, _, _ = env.get_info_for_step(obs, manual_override=manual or 'keep_going')
+            else:
+                done, success, _, _ = env.get_info_for_step(obs)
             t_after_obs = time_ms()
 
             # Return as soon as done is detected -- don't compute/send one more action
@@ -337,11 +415,11 @@ def collect_trajectory(
             recorder.close(metadata)
         print("[between-episode] drain_and_close_recording={:.2f}s".format(time.perf_counter() - t0))
 
-def run_and_route_one(env, controller, base_dir) -> Dict[str, object]:
+def run_and_route_one(env, controller, base_dir, keys=None) -> Dict[str, object]:
     tmp_root = os.path.join(base_dir, "tmp")
     os.makedirs(tmp_root, exist_ok=True)
-    session_name = f"session_{int(time.time())}"
-    tmp_dir = os.path.join(tmp_root, session_name)
+    # A fast discard/retry must never reuse another attempt's partial directory.
+    tmp_dir = tempfile.mkdtemp(prefix='session_', dir=tmp_root)
     images_dir = os.path.join(tmp_dir, "images")
     os.makedirs(images_dir, exist_ok=True)
 
@@ -359,7 +437,15 @@ def run_and_route_one(env, controller, base_dir) -> Dict[str, object]:
         recording_folderpath=images_dir,
         test_detector=FLAGS.test_detector,
         keep_vertical=FLAGS.keep_vertical,
+        keys=keys,
     )
+
+    if result.get('discarded', False):
+        # collect_trajectory's finally has drained and closed every writer already.
+        # Fail visibly if removal fails; never route a discarded attempt to success.
+        shutil.rmtree(tmp_dir)
+        print('Discarded current rollout (HDF5 + MP4). Resetting for a new attempt.')
+        return {'dest_dir': None, 'id': None, 'result': result}
 
     success = result.get("success", False)
     print(f"Outcome: {'success' if success else 'failure'}")
@@ -435,17 +521,16 @@ def main(_):
         device_path=task_config.get("spacemouse_device_path"),
     )
 
+    with CollectionKeys() as keys:
+        run_collection(env, controller, base_dir, keys)
+
+
+def run_collection(env, controller, base_dir, keys):
     if FLAGS.test_detector:
-        print("test_detector=True: running collection loop without saving; on done will reset and continue (Ctrl+C to stop).")
-        collect_trajectory(
-            env,
-            controller=controller,
-            save_filepath=None,
-            recording_folderpath=False,
-            test_detector=True,
-            keep_vertical=FLAGS.keep_vertical,
-        )
-        return
+        print('test_detector=True: no saving. D discards/resets; Ctrl+C stops.')
+        while True:
+            collect_trajectory(env, controller=controller, test_detector=True,
+                               keep_vertical=FLAGS.keep_vertical, keys=keys)
 
     episode = 0
     successful_episodes = 0
@@ -456,7 +541,7 @@ def main(_):
         print(f"Starting trajectory collection #{episode} (Successful: {successful_episodes}/{FLAGS.num_episodes if FLAGS.num_episodes > 0 else '∞'})")
         print(f"{'=' * 60}\n")
 
-        result = run_and_route_one(env, controller, base_dir)
+        result = run_and_route_one(env, controller, base_dir, keys=keys)
         
         if result["result"]["success"]:
             successful_episodes += 1
