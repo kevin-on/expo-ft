@@ -18,7 +18,6 @@ from expo_ft.agents import initialize_checkpoint_dir
 from expo_ft.data.replay_buffer import create_replay_buffer, _critic_key_to_storage
 from expo_ft.env.env_client import EnvClientWrapper
 from expo_ft.env.droid_utils import process_droid_dataset
-from expo_ft.env.sft_eval import canonical_observation, physical_action
 
 import openpi.training.sharding as openpi_sharding
 
@@ -252,6 +251,8 @@ def main(_):
         os.makedirs(video_dir, exist_ok=True)
         logger.info("Saving evaluation videos to %s", video_dir)
 
+    if FLAGS.mirror_y:
+        raise ValueError('Set model_frame in the WS robot JSON instead of --mirror_y')
     eval_env_creation_request = {
         "example_action": example_action,
         "env_usage": "eval",
@@ -358,8 +359,6 @@ def main(_):
 
             t_obs0 = time.time()
             observation = env.get_observation()
-            if FLAGS.mirror_y:
-                observation = canonical_observation(observation, mirror=True)
             timing["obs_ms"] = (time.time() - t_obs0) * 1000.0
             t_info0 = time.time()
             done, success, reward, _ = env.get_info_for_step()
@@ -469,8 +468,6 @@ def main(_):
 
             last_control_start = time.time()
             t_act0 = time.time()
-            if FLAGS.mirror_y:
-                action = physical_action(action, mirror=True)
             _, action_type = env.step(np.asarray(action).tolist())
             ep_human_steps += int(action_type == "human")
             timing["act_ms"] = (time.time() - t_act0) * 1000.0

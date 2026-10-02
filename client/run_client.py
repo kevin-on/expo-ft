@@ -20,6 +20,7 @@ import tty
 from typing import Dict, Any, Optional
 
 import numpy as np
+from expo_ft.env.model_frame import ModelFrame
 import websockets
 import websockets.asyncio.client as _client
 from websockets.protocol import State
@@ -237,6 +238,10 @@ def _pack_observation_response(response, timing, packer):
     return result
 
 
+def _model_observation(env, observation):
+    return getattr(env, '_model_frame', ModelFrame()).observation(observation)
+
+
 async def _handle_environment_request(websocket):
     """Serve environment operation requests over the dialed connection until it closes."""
     global _task_config, _env_create_counter
@@ -260,6 +265,8 @@ async def _handle_environment_request(websocket):
                 operation = request.get("operation")
                 
                 if operation == "create_env":
+                    if request.get('coordinate_protocol') != 'ws-model-frame-v1':
+                        raise ValueError('Restart both WS and inference with ws-model-frame-v1 code')
                     task_config = load_task_config(_config_task_path)
                     for key, value in _robot_config.items():
                         current = task_config.get(key)
@@ -286,14 +293,16 @@ async def _handle_environment_request(websocket):
                     coordinated_eval = env_usage == "eval" and request.get("coordinated_eval", False)
                     if (env_usage == "train" or coordinated_eval) and request.get("async_video", False):
                         env_kwargs["async_video"] = True
+                    frame = ModelFrame(task_config.get('model_frame'))
                     env = task_config.env(**env_kwargs)
+                    env._model_frame = frame
                     _env_storage[env_id] = env
                     if env_usage == "eval" and task_config.env_type == "droid" and not coordinated_eval:
                         _eval_env_ids.add(env_id)
                     logger.info(f"Environment {env_id} created successfully")
                     
                     task_description = task_config.language_instruction
-                    response = {"status": "success", "env_id": env_id, "task_description": task_description}
+                    response = {"status": "success", "env_id": env_id, "task_description": task_description, "coordinate_protocol": "ws-model-frame-v1"}
                     await websocket.send(packer.pack(response))
                     logger.info(f"Sent create_env response for {env_id}")
                     
@@ -310,7 +319,7 @@ async def _handle_environment_request(websocket):
                             obs = env.reset()
                         response = {
                             "status": "success",
-                            "observation": obs,
+                            "observation": _model_observation(env, obs),
                             "done": False,
                         }
                     await websocket.send(packer.pack(response))
@@ -330,7 +339,7 @@ async def _handle_environment_request(websocket):
                     else:
                         # Fresh initial frame; no success detector or terminal handling
                         # before the first action. get_observation records this frame.
-                        response = {"status": "success", "observation": env.get_observation()}
+                        response = {"status": "success", "observation": _model_observation(env, env.get_observation())}
                     await websocket.send(packer.pack(response))
 
                 elif operation == "step":
@@ -349,7 +358,8 @@ async def _handle_environment_request(websocket):
                                 "Check policy inputs (observations, encoder), training stability, or checkpoint."
                             )
                             sent_action = np.where(np.isfinite(sent_action), sent_action, 0.0)
-                        real_action = sent_action.copy()
+                        frame = getattr(env, "_model_frame", ModelFrame())
+                        real_action = frame.action(sent_action)
                         action_type = "policy"
                         is_human = False
                         t_human0 = time.perf_counter()
@@ -375,7 +385,7 @@ async def _handle_environment_request(websocket):
 
                         response = {
                             "status": "success",
-                            "action": executed_action.tolist(),
+                            "action": frame.action(executed_action).tolist(),
                             "action_type": action_type,
                         }
                     t_send0 = time.perf_counter()
@@ -411,7 +421,7 @@ async def _handle_environment_request(websocket):
                         info_finished = time.perf_counter()
                         response = {
                             "status": "success",
-                            "observation": obs,
+                            "observation": _model_observation(env, obs),
                             "done": bool(done),
                             "success": bool(success),
                             "reward": float(reward),

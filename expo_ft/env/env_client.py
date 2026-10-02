@@ -209,7 +209,10 @@ class EnvClient:
 
     def create_env(self, request: dict) -> Tuple[str, str]:
         """Create an environment."""
+        request = dict(request, coordinate_protocol='ws-model-frame-v1')
         response = self._call_operation("create_env", self._prepare_request(request))
+        if response.get('coordinate_protocol') != 'ws-model-frame-v1':
+            raise RuntimeError('WS client does not provide model-frame observations/actions; update both endpoints')
         return response["env_id"], response["task_description"]
 
     def reset(self, env_id: str) -> Tuple[Dict[str, Any], bool]:

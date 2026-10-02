@@ -61,7 +61,7 @@ class SplitOverlapTests(unittest.TestCase):
         self.assertEqual(env.reset(), {'frame': 1})
         self.assertEqual(calls[-3:], ['before', 'motion', 'camera'])
 
-    def test_collector_keeps_mirror_and_streaming_without_second_reset(self):
+    def test_collector_keeps_model_frame_and_streaming_without_second_reset(self):
         physical, streamed, endings = [], [], []
         class Env:
             def __init__(self, index):
@@ -81,19 +81,19 @@ class SplitOverlapTests(unittest.TestCase):
                 pass
         ns = dict(deque=deque, Future=Future, ThreadPoolExecutor=ThreadPoolExecutor, deepcopy=deepcopy,
                   queue=queue, threading=threading, time=time, np=NS(asarray=lambda x: x),
-                  canonical_observation=lambda obs, mirror: dict(obs, mirrored=mirror),
+                  model_inputs=lambda obs: obs,
                   physical_action=lambda action, mirror: [-a for a in action] if mirror else action)
         load_definitions('expo_ft/utils/robot_round.py', ['collect_round'], ns)
         result = ns['collect_round']([Env(0), Env(1)], lambda obs: [[2.]], 1, 10000,
             mirror_robot=1, reset_done=True, check_session=lambda: None,
             on_transition=lambda *args: streamed.append(args), on_episode_end=lambda *args: endings.append(args))
-        self.assertEqual(sorted(physical), [(0, [2.]), (1, [-2.])])
+        self.assertEqual(sorted(physical), [(0, [2.]), (1, [2.])])
         self.assertEqual(len(streamed), 2)
         self.assertEqual(len(endings), 2)
         for index, (records, success) in enumerate(result):
             self.assertTrue(success)
             self.assertEqual(records[0]['actions'], [2.])
-            self.assertEqual(records[0]['observations'], {'initial': True, 'mirrored': bool(index)})
+            self.assertEqual(records[0]['observations'], {'initial': True})
 
     def run_pair(self, *, slow_reset=False, fail_reset=False, fail_update=False,
                  num_robot=2, start_step=0, max_steps=24, warmup=10,

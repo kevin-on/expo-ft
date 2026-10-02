@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 
-from expo_ft.env.sft_eval import canonical_observation, physical_action
+from expo_ft.env.model_frame import model_inputs
 
 
 def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=None,
@@ -43,14 +43,13 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
         if stopped.is_set():
             return None
         canonical = canonical_frame or mirror_robot is not None
-        mirror = index == mirror_robot
         if wait_for_start is not None and not wait_for_start(index, stopped):
             return None
         if stopped.is_set():
             return None
         observation = env.start_episode() if reset_done else env.reset()
         if canonical:
-            observation = canonical_observation(observation, mirror)
+            observation = model_inputs(observation)
         plan = deque()
         transitions = []
         action_type = "policy"
@@ -76,18 +75,12 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
             has_action = bool(plan)
             command = plan.popleft() if has_action else np.zeros_like(action)
             last_dispatch = time.monotonic()
-            if canonical:
-                command = physical_action(command, mirror)
             action, action_type = env.step(command)
-            if canonical:
-                # Reflection is its own inverse. Store the executed action,
-                # including workspace clipping and human overrides, in the model frame.
-                action = physical_action(action, mirror)
             if action_type == "human":
                 plan.clear()
             next_observation = env.get_observation()
             if canonical:
-                next_observation = canonical_observation(next_observation, mirror)
+                next_observation = model_inputs(next_observation)
             done, success, reward, mask = env.get_info_for_step()
             transitions.append(dict(
                 observations=observation, actions=action, rewards=reward,

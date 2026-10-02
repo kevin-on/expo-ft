@@ -6,7 +6,7 @@ import threading
 import time
 
 import numpy as np
-from expo_ft.env.sft_eval import canonical_observation, physical_action
+from expo_ft.env.model_frame import model_inputs
 from expo_ft.env.rollout_rate import RolloutRate
 
 
@@ -108,7 +108,7 @@ class RobotEvaluation:
         return True
 
     def plan(self, robot, observation):
-        observation = canonical_observation(observation, mirror=robot == 1)
+        observation = model_inputs(observation)
         began = time.monotonic()
         with self.policy_lock:
             self.check()
@@ -141,7 +141,7 @@ class RobotEvaluation:
                     self.stop.wait(max(0., self.period-(time.monotonic()-previous)))
                 self.check()
                 dispatched = time.monotonic()
-                _, source = env.step(physical_action(plan.popleft(), mirror=robot == 1))
+                _, source = env.step(plan.popleft())
                 acted = time.monotonic()
                 human_steps += source == 'human'
                 observation = env.get_observation()

@@ -20,3 +20,19 @@ alignment when camera access is authorized. No camera was opened to derive them.
 DROID is a separate ignored checkout. This feature requires its companion
 `camera-observation-runtime` branch as well as this EXPO branch. Do not deploy
 only the parent repository while leaving an older DROID checkout installed.
+
+## Model coordinates live at the WS boundary
+
+`model_frame.mirror_images.side/wrist` independently flip the selected model RGB
+inputs horizontally. `model_frame.mirror_robot_coordinates` reflects Y/roll/yaw
+for both Cartesian observations and policy actions. Configure all three true for
+robot1 and false for robot0 to reproduce the existing mixed dataset convention.
+`ModelFrame` owns the live transformation; ILIAD consumes already canonical data.
+Human commands execute physically, then their actual/clipped actions are reflected
+back for replay. Reset, bounds, raw video and collection HDF5 stay physical.
+Collection's offline converter still owns conversion of its physical records.
+
+New WS/inference endpoints negotiate `ws-model-frame-v1` before environment
+construction. Update both endpoints together; old binaries must not silently
+apply their own mirror or omit the WS transform. `eval_droid_policy --mirror_y`
+is superseded by the WS robot JSON and now rejects a true value.

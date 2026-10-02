@@ -63,5 +63,12 @@
         540
       ]
     }
+  },
+  "model_frame": {
+    "mirror_images": {
+      "side": false,
+      "wrist": false
+    },
+    "mirror_robot_coordinates": false
   }
 }

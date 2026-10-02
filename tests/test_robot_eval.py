@@ -127,7 +127,7 @@ class EvalTest(unittest.TestCase):
             self.assertTrue(session.results.empty());self.assertEqual(env.starts,0)
         finally:session.close()
 
-    def test_start_gate_mirror_shared_policy_and_results(self):
+    def test_start_gate_model_frame_shared_policy_and_results(self):
         envs={0:Env(),1:Env()};observations=[];active=0;peak=0
         def predict(obs):
             nonlocal active,peak
@@ -143,9 +143,9 @@ class EvalTest(unittest.TestCase):
             self.assertEqual(peak,1)
             self.assertTrue(all(e.resets==2 and e.starts==1 for e in envs.values()))
             np.testing.assert_array_equal(envs[0].steps[0],np.ones(7)*.25)
-            np.testing.assert_array_equal(envs[1].steps[0],np.array([1,-1,1,-1,1,-1,1])*.25)
-            mirrored=[o for o in observations if o['cartesian_position'][1]<0][0]
-            np.testing.assert_array_equal(mirrored['wrist_image_left'],observation()['wrist_image_left'][:,::-1])
+            np.testing.assert_array_equal(envs[1].steps[0],np.ones(7)*.25)
+            for obs in observations:
+                np.testing.assert_array_equal(obs['wrist_image_left'],observation()['wrist_image_left'])
             rows=[session.results.get_nowait() for _ in envs]
             for row in rows:
                 self.assertEqual(row['human_steps'],1);self.assertEqual(row['intervention_rate'],.5)
