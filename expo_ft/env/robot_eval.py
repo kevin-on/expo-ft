@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 from expo_ft.env.sft_eval import canonical_observation, physical_action
+from expo_ft.env.rollout_rate import RolloutRate
 
 
 class RobotEvaluation:
@@ -24,13 +25,19 @@ class RobotEvaluation:
         self.by_robot, self.barriers = {}, []
         self.results = queue.SimpleQueue()
         self.states = {r: dict(status='waiting', steps=0, episodes=0, successes=0, last=None) for r in envs}
+        self.rates = {r: RolloutRate() for r in envs}
 
     def snapshot(self):
         with self.lock:
-            return {r: dict(s) for r,s in self.states.items()}
+            return {r: dict(s, rollout_hz=self.rates[r].hz() if s['status']=='running' else None)
+                    for r,s in self.states.items()}
 
     def state(self, robot, **values):
         with self.lock:
+            if values.get('status') == 'starting':
+                self.rates[robot].reset()
+            elif values.get('status') == 'running' and 'steps' in values:
+                self.rates[robot].step()
             self.states[robot].update(values)
 
     def check(self):
@@ -146,6 +153,9 @@ class RobotEvaluation:
                     observation_ms=(arrived-acted)*1000,
                     observation_age_ms=(dispatched-observed)*1000,
                     policy_observation_age_ms=(dispatched-policy_observed)*1000))
+                get_timing = getattr(env, 'get_observation_timing', None)
+                if get_timing is not None:
+                    timings[-1]['observation_breakdown'] = get_timing()
                 self.state(robot, status='running', steps=step)
                 previous, observed, plan_ms = dispatched, arrived, 0.
                 if done:

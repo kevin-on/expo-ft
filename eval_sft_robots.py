@@ -29,8 +29,9 @@ def display(session, episodes):
     lines = ['Policy evaluation | Space: start when ALL ready | r/t: reset READY robot0/1 | q: quit']
     for robot, state in session.snapshot().items():
         last = '-' if state['last'] is None else ('SUCCESS' if state['last'] else 'FAIL')
+        hz = '—' if state.get('rollout_hz') is None else f"{state['rollout_hz']:.1f}"
         lines.append(f"robot{robot}: {state['status']:<18} step {state['steps']:3}/{session.max_steps} "
-                     f"episodes {state['episodes']}/{episodes} success {state['successes']}/{state['episodes']} last {last}")
+                     f"{hz} Hz  episodes {state['episodes']}/{episodes} success {state['successes']}/{state['episodes']} last {last}")
     sys.stdout.write('\033[H\033[J'+'\n'.join(lines)+'\n');sys.stdout.flush()
 
 

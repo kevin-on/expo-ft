@@ -31,6 +31,7 @@ def terminal_env(writer):
     env.reached_boundary = lambda obs: False
     env.detect = lambda obs: (False, False)
     env.video_dir = "unused"
+    env.video_encoder_threads = 2
     env._raw_frame_buffer = [object()]
     env._record_frame_buffer = [object()]
     env._ep_count = 3
@@ -39,6 +40,20 @@ def terminal_env(writer):
 
 
 class AsyncVideoTests(unittest.TestCase):
+    def test_preparation_failure_is_logged_and_other_views_still_save(self):
+        saved = []
+        def prepare(prefix, frame):
+            if prefix == 'raw': raise ValueError('bad frame')
+            return frame + 1
+        def save(frames, directory, episode, **kwargs):
+            saved.append((kwargs['prefix'], frames))
+        writer = EpisodeVideoWriter(save, prepare)
+        with self.assertLogs('async_video', level='ERROR') as logs:
+            writer.submit([('raw', [1]), ('record', [2])], 'unused', 0)
+            writer.close()
+        self.assertIn('bad frame', '\n'.join(logs.output))
+        self.assertEqual(saved, [('record', [3])])
+
     def test_terminal_response_and_reset_buffers_do_not_wait_for_encoding(self):
         encoding = threading.Event()
         release = threading.Event()

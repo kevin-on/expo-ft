@@ -1,4 +1,5 @@
 import time
+from functools import partial
 import logging
 
 import cv2
@@ -13,7 +14,16 @@ from client.real_utils.detector import PickBlocksDetector
 from client.real_utils.detector import LightPlugDetector
 from client.real_utils.detector import success_detector_manual
 
-    
+
+def _prepare_video_frame(prefix, frame):
+    """Only owned images/IDs, never a live environment or camera reader."""
+    if prefix == "raw":
+        raw_obs, side_id, wrist_id = frame
+        return raw_frame_from_raw_obs(raw_obs, side_id, wrist_id)
+    rec = np.asarray(frame, dtype=np.uint8)
+    return cv2.cvtColor(rec, cv2.COLOR_BGRA2RGB if rec.shape[-1] == 4 else cv2.COLOR_BGR2RGB)
+
+
 class DroidEnv(RobotEnv):
     def __init__(
         self,
@@ -34,11 +44,15 @@ class DroidEnv(RobotEnv):
         control_hz = None,
         video_dir = None,
         async_video = False,
+        video_encoder_threads = 2,
         camera_intrinsics = None,
         camera_extrinsics = None,
         record_camera = None,
         **kwargs,
     ):
+        if video_encoder_threads < 1:
+            raise ValueError("video_encoder_threads must be positive")
+        self.video_encoder_threads = video_encoder_threads
         robot_kwargs = {key: kwargs[key] for key in (
             "robot_server_ip", "robot_server_port", "launch_controller", "camera_serials",
             "wrist_camera_serial", "camera_kwargs", "blank_camera_serials",
@@ -86,7 +100,12 @@ class DroidEnv(RobotEnv):
         self._raw_frame_buffer = []
         self._record_frame_buffer = []
         self._ep_count = 0
-        self._video_writer = EpisodeVideoWriter(save_episode_video_to_disk) if async_video and video_dir else None
+        self._video_writer = (
+            EpisodeVideoWriter(
+                partial(save_episode_video_to_disk, encoder_threads=self.video_encoder_threads),
+                _prepare_video_frame,
+            ) if async_video and video_dir else None
+        )
 
     def reset(self, *, return_observation=True):
         self._before_reset()
@@ -150,7 +169,8 @@ class DroidEnv(RobotEnv):
                     self._video_writer.submit(videos, self.video_dir, self._ep_count)
                 else:
                     for prefix, frames in videos:
-                        save_episode_video_to_disk(frames, self.video_dir, self._ep_count, prefix=prefix)
+                        save_episode_video_to_disk(frames, self.video_dir, self._ep_count, prefix=prefix,
+                                                   encoder_threads=self.video_encoder_threads)
             if self.video_dir:
                 self._ep_count += 1
         self.done, self.success, self.reward, self.info = done, success, 1.0 if success else 0.0, {}
@@ -161,6 +181,18 @@ class DroidEnv(RobotEnv):
     def detect(self, raw_obs):
         """Override in subclasses. Base: no detector, always False."""
         raise NotImplementedError("detect not implemented for base DroidEnv")
+
+    def get_state(self):
+        started = time.perf_counter()
+        result = super().get_state()
+        self._state_read_ms = (time.perf_counter() - started) * 1000
+        return result
+
+    def read_cameras(self):
+        started = time.perf_counter()
+        result = super().read_cameras()
+        self._cameras_read_ms = (time.perf_counter() - started) * 1000
+        return result
 
     def get_raw_observation(self):
         raw_obs = super().get_observation()
@@ -203,19 +235,51 @@ class DroidEnv(RobotEnv):
         return data_dict
 
     def get_observation(self):
+        started = time.perf_counter()
+        self._state_read_ms = self._cameras_read_ms = None
         raw_obs = self.get_raw_observation()
+        raw_finished = time.perf_counter()
         if self.video_dir:
-            frame = raw_frame_from_raw_obs(raw_obs, self.side_camera_id, self.wrist_camera_id)
-            if frame is not None:
-                self._raw_frame_buffer.append(frame)
-            if self.record_camera and self.record_camera in raw_obs.get("image", {}):
-                rec = np.asarray(raw_obs["image"][self.record_camera], dtype=np.uint8)
-                if rec.shape[-1] == 4:
-                    rec = cv2.cvtColor(rec, cv2.COLOR_BGRA2RGB)
-                else:
-                    rec = cv2.cvtColor(rec, cv2.COLOR_BGR2RGB)
-                self._record_frame_buffer.append(rec)
-        return self.transform_observation(raw_obs)
+            if self._video_writer is not None:
+                # ZedCamera._process_frame returns an owned copy, not reusable SDK
+                # storage. Retain only selected views; policy transforms don't
+                # mutate them. Preparation runs in the episode worker after done.
+                images = raw_obs.get("image", {})
+                if self.side_camera_id in images:
+                    selected = {key: images[key] for key in (self.side_camera_id, self.wrist_camera_id)
+                                if key in images}
+                    self._raw_frame_buffer.append(({"image": selected}, self.side_camera_id, self.wrist_camera_id))
+                if self.record_camera and self.record_camera in images:
+                    self._record_frame_buffer.append(images[self.record_camera])
+            else:
+                frame = raw_frame_from_raw_obs(raw_obs, self.side_camera_id, self.wrist_camera_id)
+                if frame is not None:
+                    self._raw_frame_buffer.append(frame)
+                if self.record_camera and self.record_camera in raw_obs.get("image", {}):
+                    self._record_frame_buffer.append(_prepare_video_frame("record", raw_obs["image"][self.record_camera]))
+        video_finished = time.perf_counter()
+        observation = self.transform_observation(raw_obs)
+        finished = time.perf_counter()
+        self.observation_timing = dict(
+            raw_observation_ms=(raw_finished - started) * 1000,
+            video_frame_ms=(video_finished - raw_finished) * 1000,
+            transform_ms=(finished - video_finished) * 1000,
+            total_ms=(finished - started) * 1000,
+        )
+        for key, value in (("robot_state_ms", self._state_read_ms),
+                           ("cameras_ms", self._cameras_read_ms)):
+            if value is not None:
+                self.observation_timing[key] = value
+        # SDK timestamps measure grab only, not retrieve/resize. Cameras run in
+        # parallel: these are diagnostics, not additive parts of cameras_ms.
+        timestamps = raw_obs.get("timestamp", {}).get("cameras", {})
+        for view, camera_id in (("side", self.side_camera_id), ("wrist", self.wrist_camera_id)):
+            if camera_id:
+                serial = camera_id.rsplit("_", 1)[0]
+                begin, end = timestamps.get(serial + "_read_start"), timestamps.get(serial + "_read_end")
+                if begin is not None and end is not None:
+                    self.observation_timing[view + "_grab_ms"] = float(end - begin)
+        return observation
 
     def reached_boundary(self, raw_obs):
         pos = np.asarray(raw_obs["robot_state"]["cartesian_position"][:3], dtype=np.float64)
@@ -328,7 +392,8 @@ class PickBlocksEnv(DroidEnv):
                 raise ValueError("record_camera is set but video_dir is empty; recordings are required")
             release_zed_from_reader(self.camera_reader, self.record_camera)
             self._recorder = ZedRecorder(self.video_dir, serial=self.record_camera,
-                                         resolution=record_resolution, fps=record_fps)
+                                         resolution=record_resolution, fps=record_fps,
+                                         encoder_threads=self.video_encoder_threads)
 
     def _before_reset(self):
         if self.pick_detector is not None:

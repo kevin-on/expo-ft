@@ -78,7 +78,10 @@ class ZedRecorder:
     rate; start()/stop() only gate whether frames are written, one MP4 per episode.
     """
 
-    def __init__(self, video_dir, serial=None, resolution=None, fps=None, start_timeout=20.0):
+    def __init__(self, video_dir, serial=None, resolution=None, fps=None, start_timeout=20.0, encoder_threads=2):
+        if encoder_threads < 1:
+            raise ValueError("encoder_threads must be positive")
+        self.encoder_threads = encoder_threads
         import pyzed.sl as sl
 
         self.video_dir = video_dir
@@ -235,7 +238,8 @@ class ZedRecorder:
                     writer = imageio.get_writer(
                         self._mp4_path, fps=self.fps, codec="libx264", macro_block_size=2,
                         pixelformat="yuv420p",
-                        ffmpeg_params=["-preset", "veryfast", "-crf", "20"],
+                        ffmpeg_params=["-preset", "veryfast", "-crf", "20",
+                                       "-threads", str(self.encoder_threads)],
                     )
                 elif not recording and writer is not None:
                     writer.close()

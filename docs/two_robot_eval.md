@@ -33,6 +33,23 @@ No checkpoint-config branch changes were merged.
    starts two child processes and records their logs under `data/logs/eval-*`.
    It only stops its own children when one exits or the launcher is interrupted.
 
+WS MP4 encoding defaults to **2 threads per encoder**. Override it on the client:
+
+```bash
+bash scripts/pick/run_sft_eval_client.sh both --video-encoder-threads 1
+# Online rollout client uses the same option:
+bash scripts/multi_robot/run_workstation_rollout.sh 0 --video-encoder-threads 1
+# Data collection (also accepts --video_encoder_threads):
+ROBOT_ID=0 bash scripts/pick/collect_data.sh --video-encoder-threads=1
+```
+
+The value must be positive. It controls libx264 encoding, including asynchronous
+episode videos and the optional dedicated record camera. It does not limit image
+preprocessing or total process CPU use. Concurrent writers each get this many
+threads; collection can have several writers per robot. Fewer threads can delay
+saving and cause the bounded recording queue to wait. Restart the WS client or
+collection process to apply a changed value; the GPU server needs no restart.
+
 The GPU terminal shows each robot's status, step count, completed episodes,
 success count and last success/failure. Each robot resets independently. Once
 **all selected robots are ready**, Space starts one round. Space while busy is
@@ -54,8 +71,40 @@ its client-local pause behavior.
 `episodes.jsonl` is flushed after each completed episode and contains robot ID,
 round, success, steps, human steps, per-episode intervention rate, `had_intervention` and `success_without_intervention`, plus observation/inference/action
 RPC timings. `eval_config.json` records checkpoint/task/eyes/omitted cameras.
-MP4 encoding is asynchronous on WS and drained when the environment closes.
+Each step's `timings[].observation_breakdown` additionally records local RPC,
+request packing/send, response wait/unpack durations and response byte count.
+Its `ws` member contains observation processing, termination (including terminal
+video submission/backpressure), and response packing durations. `ws.environment`
+splits observation construction into raw observation, video-frame preparation,
+and image transformation; robot-state and combined camera reads are nested
+within raw observation. Side/wrist `*_grab_ms` use existing SDK read timestamps
+and exclude image retrieval/resize. They overlap because cameras read in parallel;
+do not sum them or add nested fields to their parent durations.
+`transport_and_queue_ms` is RPC time minus request packing, response unpacking,
+WS processing and WS packing. It includes transport, scheduling, socket queues,
+and the final WS serialized-buffer copy; it is not pure network latency. Packing
+is measured once before appending the small timing entry to the MessagePack map.
+All other durations use local monotonic clocks, without cross-host timestamp
+subtraction. Timings are response metadata, never policy inputs. No flag is
+required; older WS clients simply omit the WS breakdown. Restart both the WS
+client and eval server to apply instrumentation to a new run.
+Video-frame preparation (color conversion/concatenation) and MP4 encoding are
+asynchronous on WS and drained when the environment closes. During rollout we
+retain only selected camera images already copied out of SDK storage; no second
+copy/concatenation is made for video in the control loop. At episode end the
+worker prepares each frame in place in the detached buffer, then encodes it.
+`video_frame_ms` therefore measures buffer bookkeeping for asynchronous eval;
+`VIDEO_PREPARE_FINISHED` in the WS log records background preparation time.
+The existing one-pending-episode bound remains: if the prior video is still
+saving when the next episode ends, submission waits instead of growing memory.
 Unfinished episodes are not reported as completed successes/failures.
+
+The eval and online inference TUIs show each robot's live rollout Hz over up to
+the latest ten completed-step intervals. This measures control-loop throughput
+(including observation/RPC/replanning), not GPU inference calls per second.
+It updates after two completed steps, decreases when a running step stalls,
+and shows `—` during ready/reset/update states. Every new episode clears the
+window, excluding manual waiting and reset time. No CLI option is required.
 
 `tests/test_robot_eval.py` uses fake environments to verify gates, independent
 reset, shared policy serialization, mirroring, termination and failure cleanup.

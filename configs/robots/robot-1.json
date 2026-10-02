@@ -9,7 +9,7 @@
   "wrist_camera_serial": "12841040",
   "side_camera_id": "29838012_left",
   "wrist_camera_id": "12841040_right",
-  "spacemouse_device_path": "/dev/hidraw6",
+  "spacemouse_device_path": "/dev/hidraw3",
   "bounds": [
     [0.355, 0.550],
     [0.035, 0.245],

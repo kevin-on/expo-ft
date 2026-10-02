@@ -63,6 +63,9 @@ flags.DEFINE_bool(
     False,
     "If True, never return when done; reset env and keep the collection loop running (for testing the detector).",
 )
+# Saved MP4 encoder CPU budget (per writer).
+flags.DEFINE_integer("video_encoder_threads", 2, "CPU encoding threads per MP4 writer.")
+flags.DEFINE_alias("video-encoder-threads", "video_encoder_threads")
 # Saved MP4 resolution (width, height); reuse resized HDF5 images.
 flags.DEFINE_integer("video_save_width", 320, "Width of saved MP4 frames.")
 flags.DEFINE_integer("video_save_height", 180, "Height of saved MP4 frames.")
@@ -151,13 +154,16 @@ class CollectionRecorder:
     """One ordered worker owns image transforms, HDF5 and MP4 for an episode."""
 
     def __init__(self, env, filepath, recording_folderpath, save_right_images,
-                 video_size, max_pending=8):
+                 video_size, max_pending=8, video_encoder_threads=2):
         if max_pending < 1:
             raise ValueError("max_pending must be positive")
         self.env = env
         self.filepath = filepath
         self.video_dir = os.path.join(os.path.dirname(recording_folderpath), "recordings", "MP4")
         self.save_right_images = save_right_images
+        if video_encoder_threads < 1:
+            raise ValueError("video_encoder_threads must be positive")
+        self.video_encoder_threads = video_encoder_threads
         self.video_size = video_size
         self.max_pending = max_pending
         self.pending = deque()
@@ -194,7 +200,8 @@ class CollectionRecorder:
                         self.videos[key] = imageio.get_writer(
                             os.path.join(self.video_dir, f"{key}.mp4"),
                             fps=30, format="ffmpeg", codec="libx264", macro_block_size=1,
-                            output_params=["-preset", "ultrafast", "-crf", "28"],
+                            output_params=["-preset", "ultrafast", "-crf", "28",
+                                           "-threads", str(self.video_encoder_threads)],
                         )
             # Use the existing HDF5 schema/serializer, synchronously in this worker.
             # No second unbounded writer queue; write failures reach the control loop.
@@ -362,6 +369,7 @@ def collect_trajectory(
                     recorder = CollectionRecorder(
                         env, save_filepath, recording_folderpath, FLAGS.save_right_images,
                         (FLAGS.video_save_width, FLAGS.video_save_height),
+                        video_encoder_threads=FLAGS.video_encoder_threads,
                     )
                 print("start recording (async image transform + HDF5 + MP4)")
 
@@ -476,6 +484,8 @@ def run_and_route_one(env, controller, base_dir, keys=None) -> Dict[str, object]
 
 
 def main(_):
+    if FLAGS.video_encoder_threads < 1:
+        raise ValueError("video_encoder_threads must be positive")
     width, height = FLAGS.video_save_width, FLAGS.video_save_height
     if width <= 0 or height <= 0:
         raise ValueError("video_save_width/height must both be positive")
@@ -497,6 +507,7 @@ def main(_):
     task_config.gripper_action_space = "velocity"
     
     env_kwargs = dict(task_config)
+    env_kwargs["video_encoder_threads"] = FLAGS.video_encoder_threads
     camera_kwargs = {
         key: dict(value)
         for key, value in task_config.camera_kwargs.items()

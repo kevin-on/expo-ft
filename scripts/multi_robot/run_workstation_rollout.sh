@@ -4,7 +4,8 @@
 # Update that endpoint when using a different GPU server.
 # Starts real hardware when the learner requests create_env/reset.
 set -euo pipefail
-robot_index=${1:?Usage: run_workstation_rollout.sh 0|1}
+robot_index=${1:?Usage: run_workstation_rollout.sh 0|1 [client options]}
+shift
 case "$robot_index" in 0|1) ;; *) echo 'Robot index must be 0 or 1' >&2; exit 2;; esac
 # Two-robot online training always uses the SFT/eval camera eyes and robot1 mirror.
 source /scr/kevinon/env.sh
@@ -44,4 +45,4 @@ print(f'Robot {robot_index}: cameras AVAILABLE; both robot mappings and selected
 PY
 exec client/.venv/bin/python -m client.run_client \
  --host "${EXPO_LEARNER_HOST:-iris6.stanford.edu}" --port "$(( ${EXPO_LEARNER_BASE_PORT:-8102} + robot_index ))" \
- --config-task-path configs/task/pick.py --robot-config "configs/robots/robot-${robot_index}.json"
+ --config-task-path configs/task/pick.py --robot-config "configs/robots/robot-${robot_index}.json" "$@"

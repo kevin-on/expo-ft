@@ -252,8 +252,9 @@ def lines(session, worker, episodes):
         for r,state in status.get('robots',{}).items():
             last='—' if state['last'] is None else 'SUCCESS' if state['last'] else 'FAIL'
             rate=f"{100*state['successes']/state['episodes']:.1f}%" if state['episodes'] else '—'
+            hz = '—' if state.get('rollout_hz') is None else f"{state['rollout_hz']:.1f}"
             result.append(f"Robot {r}  {state['status']:<18}  {state['steps']:3}/{status['max_steps']} steps"
-                          f"   {state['successes']}/{state['episodes']} ({rate})   last {last}")
+                          f"   {hz} Hz   {state['successes']}/{state['episodes']} ({rate})   last {last}")
         result += ['','[0/1] Start robot  [Space] Start both  [r/t] Reset READY robot 0/1  [Esc] End eval']
     else:
         gpu = 'Starting eval' if s['mode']=='eval' else 'GPU released'

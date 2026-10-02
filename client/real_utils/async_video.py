@@ -1,4 +1,4 @@
-"""One background video encoder per environment, with bounded frame ownership."""
+"""One background video preparation/encoder worker, with bounded ownership."""
 
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -13,8 +13,9 @@ class EpisodeVideoWriter:
     allowing full-resolution frame buffers to accumulate without a bound.
     """
 
-    def __init__(self, save_video):
+    def __init__(self, save_video, prepare_frame=None):
         self._save_video = save_video
+        self._prepare_frame = prepare_frame
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="episode-video")
         self._pending = None
         self._closed = False
@@ -35,6 +36,16 @@ class EpisodeVideoWriter:
         started = time.monotonic()
         for prefix, frames in videos:
             try:
+                if self._prepare_frame is not None:
+                    prepared_at = time.monotonic()
+                    # Replace source frames one at a time, avoiding a second
+                    # full-episode list of prepared images alongside the raw ones.
+                    for index, frame in enumerate(frames):
+                        frames[index] = self._prepare_frame(prefix, frame)
+                    logging.getLogger(__name__).info(
+                        "VIDEO_PREPARE_FINISHED episode=%d prefix=%s elapsed_seconds=%.3f",
+                        episode, prefix, time.monotonic() - prepared_at,
+                    )
                 self._save_video(frames, video_dir, episode, prefix=prefix)
             except Exception:
                 # Match synchronous video's nonfatal logging; still attempt other views.

@@ -2,13 +2,14 @@
 # Real hardware launcher. Controls live in the GPU terminal, not these clients.
 set -euo pipefail
 selection=${1:-both}
+if (( $# )); then shift; fi
 case "$selection" in both|0|1) ;; *) echo 'Usage: run_sft_eval_client.sh [both|0|1]' >&2; exit 2;; esac
 : "${EXPO_EVAL_HOST:?Set the eval host or local SSH tunnel endpoint}"
 source /scr/kevinon/env.sh
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 python=${EXPO_CLIENT_PYTHON:-client/.venv/bin/python}
-args=(--host "$EXPO_EVAL_HOST" --config-task-path configs/task/pick.py)
+args=(--host "$EXPO_EVAL_HOST" --config-task-path configs/task/pick.py "$@")
 base_port=${EXPO_EVAL_BASE_PORT:-8202}
 if [[ $selection != both ]]; then
     exec "$python" -m client.run_client "${args[@]}" --port "$((base_port+selection))" \

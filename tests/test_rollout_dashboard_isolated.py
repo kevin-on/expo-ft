@@ -8,6 +8,7 @@ import threading
 import time
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 from contextlib import redirect_stdout
 import io
 
@@ -23,6 +24,22 @@ collect_round = namespace['collect_round']
 
 
 class DashboardTests(unittest.TestCase):
+    def test_hz_display_includes_human_control_and_resets_each_round(self):
+        ui = Dashboard(2, 80)
+        ui.ready(0, 0)
+        with patch('expo_ft.env.rollout_rate.time.monotonic', return_value=0):
+            ui.step(0, 1, False)
+        with patch('expo_ft.env.rollout_rate.time.monotonic', return_value=.2):
+            ui.step(0, 2, True)
+            output = io.StringIO()
+            with redirect_stdout(output): ui.draw()
+            self.assertIn('Hz', output.getvalue())
+            self.assertIn('5.0', output.getvalue())
+            self.assertIn('human', output.getvalue())
+            self.assertIsNone(ui.rates[1].hz())
+            ui.ready(1, 1)
+            self.assertIsNone(ui.rates[0].hz())
+
     def test_resume_totals_continue_without_double_counting_or_counting_handoff(self):
         for robots in (1, 2):
             progress = Progress(robots)

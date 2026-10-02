@@ -40,6 +40,7 @@ class EnvClient:
         # Termination/detection piggybacked on the last get_observation() response,
         # consumed by get_info_for_step() so it needs no separate round-trip.
         self._last_info = None
+        self.observation_timing = {}
         # The accept server runs in a background thread and hands each incoming
         # connection to the calling loop via this condition/slot.
         self._server = None
@@ -149,11 +150,35 @@ class EnvClient:
                 conn = self._get_connection()
                 if self._closed:
                     raise RuntimeError("Environment connection closed")
-                conn.send(self._packer.pack({"operation": operation, **request}))
-                recv_start = time.time()
+                rpc_start = time.perf_counter()
+                packed = self._packer.pack({"operation": operation, **request})
+                packed_at = time.perf_counter()
+                conn.send(packed)
+                recv_start = time.perf_counter()
                 raw = conn.recv()
-                self.network_ms += (time.time() - recv_start) * 1000.0
+                received_at = time.perf_counter()
+                self.network_ms += (received_at - recv_start) * 1000.0
                 response = msgpack_numpy.unpackb(raw)
+                decoded_at = time.perf_counter()
+                if operation == "get_observation":
+                    timing = dict(
+                        rpc_ms=(decoded_at - rpc_start) * 1000,
+                        request_pack_ms=(packed_at - rpc_start) * 1000,
+                        request_send_ms=(recv_start - packed_at) * 1000,
+                        response_wait_ms=(received_at - recv_start) * 1000,
+                        response_unpack_ms=(decoded_at - received_at) * 1000,
+                        response_bytes=len(raw),
+                    )
+                    ws = response.get("observation_timing")
+                    if ws and "processing_ms" in ws and "response_pack_ms" in ws:
+                        timing["ws"] = ws
+                        # Includes socket queues/scheduling and unmeasured WS
+                        # copies; NOT pure wire latency. No cross-host clocks.
+                        timing["transport_and_queue_ms"] = (
+                            (received_at - packed_at) * 1000
+                            - ws["processing_ms"] - ws["response_pack_ms"]
+                        )
+                    self.observation_timing = timing
                 if response.get("status", response.get("stats")) == "error":
                     raise RuntimeError(
                         f"Environment operation {operation} failed: {response.get('message')}"
@@ -213,6 +238,7 @@ class EnvClient:
 
     def get_observation(self, env_id: str) -> dict:
         """Get the observation of the environment."""
+        self.observation_timing = {}
         response = self._call_operation("get_observation", {"env_id": env_id})
         # Termination/detection is piggybacked on the obs response (server computes it on
         # the same frame). Cache it so get_info_for_step needs no separate round-trip.
@@ -321,6 +347,10 @@ class EnvClientWrapper:
     def get_info_for_step(self):
         """Evaluate termination after a step: (done, success, reward, continuation_mask)."""
         return self._call("get_info_for_step", lambda: self.client.get_info_for_step(self.env_id))
+
+    def get_observation_timing(self):
+        """Diagnostics for the last observation RPC, never model input."""
+        return dict(self.client.observation_timing)
 
     def pop_network_ms(self):
         """Return time (ms) spent waiting for client replies since the last call, and reset."""

@@ -9,6 +9,8 @@ import threading
 import time
 import tty
 
+from expo_ft.env.rollout_rate import RolloutRate
+
 
 class RolloutProgress:
     """Checkpointed episode totals, independent of whether a TUI is running."""
@@ -46,6 +48,7 @@ class RolloutDashboard:
         self.total_transitions = 0
         self.states = [dict(status="connecting", steps=0, completed=0, successes=0,
                             last="-", transitions=0, seconds=0., started=None, human=0) for _ in range(num_robot)]
+        self.rates = [RolloutRate() for _ in range(num_robot)]
         self.fd = None
         self.thread = None
         self.lines = 0
@@ -87,6 +90,8 @@ class RolloutDashboard:
             self.phase = "Rollout"
             for state in self.states:
                 state.update(status="ready", steps=0, seconds=0., started=None, human=0)
+            for rate in self.rates:
+                rate.reset()
             self.condition.notify_all()
 
     def handle_key(self, key):
@@ -143,6 +148,7 @@ class RolloutDashboard:
     def step(self, robot, steps, is_hil, *, trainable=True):
         with self.condition:
             state = self.states[robot]
+            self.rates[robot].step()
             state.update(status="human" if is_hil else "running", steps=steps)
             state["human"] += int(bool(is_hil))
             state['transitions'] += int(trainable)
@@ -161,13 +167,15 @@ class RolloutDashboard:
             rows = [f"Online FT | {self.mode.upper()} | Round {self.round} | Policy {self.policy} | {self.phase}",
                     f"Total transitions: {self.total_transitions:,} (online replay; excludes demos and handoff polls)",
                     "0/1: start robot  Space: start READY robots  r/t: reset robot0/1 (manual READY)  m: auto/manual  q: stop",
-                    "Robot  Status          Step   Episodes   Success       Last       Seconds  Human  Transitions"]
+                    "Robot  Status          Step      Hz   Episodes   Success       Last       Seconds  Human  Transitions"]
             for robot, state in enumerate(self.states):
                 count = state["completed"]
                 rate = state["successes"] / count if count else 0.
                 seconds = time.monotonic() - state["started"] if state["started"] is not None else state["seconds"]
+                hz = self.rates[robot].hz() if state['status'] in ('running', 'human') else None
+                hz_text = '—' if hz is None else f'{hz:.1f}'
                 rows.append(f"  {robot}    {state['status']:<14} {state['steps']:>3}/{self.max_steps:<3}"
-                            f"   {count:>4}     {state['successes']:>3} ({rate:>4.0%})"
+                            f"  {hz_text:>5}   {count:>4}     {state['successes']:>3} ({rate:>4.0%})"
                             f"  {state['last']:<9} {seconds:>6.1f}s  {state['human']:>4}  {state['transitions']:>8,}")
             rows.append(self.message)
         if self.lines:

@@ -76,6 +76,8 @@ class Args:
     config_task_path: str = "configs/task/pick.py"
     step_timing_threshold_ms: float = 30.0
     robot_config: Optional[str] = None
+    # CPU encoding threads per MP4 writer (not a process-wide CPU cap).
+    video_encoder_threads: int = 2
 
 
 _env_storage: Dict[str, Any] = {}
@@ -83,6 +85,7 @@ _eval_env_ids: set[str] = set()
 _config_task_path: Optional[str] = None
 _task_config: Optional[Any] = None
 _robot_config: dict = {}
+_video_encoder_threads: int = 2
 # Monotonic suffix so each create_env yields a distinct env_id. Without this, two trainers that share
 # one server (same env_name+env_usage) collide on a single env instance and corrupt each other's
 # rollouts. Per-job unique ports (see train_robo_car_launch.sh) prevent sharing; this isolates envs
@@ -214,11 +217,32 @@ def _get_human_override_action(task_config: Optional[Any] = None) -> tuple:
         return None, False
 
 
+def _pack_observation_response(response, timing, packer):
+    """Pack image arrays once, then append timing to the same MessagePack map.
+
+    packer uses autoreset=False. Packing time excludes the final bytes copy and
+    tiny timing entry, which necessarily occur after its measurement.
+    """
+    packer.reset()
+    started = time.perf_counter()
+    packer.pack_map_header(len(response) + 1)
+    for key, value in response.items():
+        packer.pack(key)
+        packer.pack(value)
+    timing["response_pack_ms"] = (time.perf_counter() - started) * 1000
+    packer.pack("observation_timing")
+    packer.pack(timing)
+    result = packer.bytes()
+    packer.reset()
+    return result
+
+
 async def _handle_environment_request(websocket):
     """Serve environment operation requests over the dialed connection until it closes."""
     global _task_config, _env_create_counter
     logger = logging.getLogger(__name__)
     packer = msgpack_numpy.Packer()
+    timing_packer = msgpack_numpy.Packer(autoreset=False)
 
     # Disable Nagle on this socket: tiny response frames (info/step) otherwise stall
     # ~40ms on the delayed-ACK timer. Effective on a direct app-owned socket.
@@ -258,6 +282,7 @@ async def _handle_environment_request(websocket):
                     env_kwargs = dict(task_config)
                     env_kwargs["video_dir"] = request.get("video_dir") or ""
                     env_kwargs["env_usage"] = env_usage
+                    env_kwargs["video_encoder_threads"] = _video_encoder_threads
                     coordinated_eval = env_usage == "eval" and request.get("coordinated_eval", False)
                     if (env_usage == "train" or coordinated_eval) and request.get("async_video", False):
                         env_kwargs["async_video"] = True
@@ -371,6 +396,7 @@ async def _handle_environment_request(websocket):
                         )
 
                 elif operation == "get_observation":
+                    observation_started = time.perf_counter()
                     env_id = request["env_id"]
                     env = _env_storage.get(env_id)
 
@@ -378,9 +404,11 @@ async def _handle_environment_request(websocket):
                         response = {"status": "error", "message": f"Environment {env_id} not found"}
                     else:
                         obs = env.get_observation()
+                        observation_finished = time.perf_counter()
                         # Piggyback termination/detection on the (large) obs response so the
                         # client doesn't need a separate tiny get_info_for_step round-trip.
                         done, success, reward, mask = env.get_info_for_step()
+                        info_finished = time.perf_counter()
                         response = {
                             "status": "success",
                             "observation": obs,
@@ -389,7 +417,15 @@ async def _handle_environment_request(websocket):
                             "reward": float(reward),
                             "mask": float(mask),
                         }
-                    await websocket.send(packer.pack(response))
+                    timing = {}
+                    if env is not None:
+                        timing = dict(
+                            environment=dict(getattr(env, "observation_timing", {})),
+                            get_observation_ms=(observation_finished - observation_started) * 1000,
+                            termination_ms=(info_finished - observation_finished) * 1000,
+                            processing_ms=(time.perf_counter() - observation_started) * 1000,
+                        )
+                    await websocket.send(_pack_observation_response(response, timing, timing_packer))
 
                 elif operation == "get_info_for_step":
                     env_id = request["env_id"]
@@ -485,7 +521,10 @@ async def _run_client(
 
 async def main_async(args: Args) -> None:
     """Main async entry point."""
-    global _robot_config
+    global _robot_config, _video_encoder_threads
+    if args.video_encoder_threads < 1:
+        raise ValueError("video_encoder_threads must be positive")
+    _video_encoder_threads = args.video_encoder_threads
     if args.robot_config:
         with open(args.robot_config) as file:
             _robot_config = json.load(file)
