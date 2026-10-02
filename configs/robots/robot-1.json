@@ -71,5 +71,10 @@
       "wrist": true
     },
     "mirror_robot_coordinates": true
+  },
+  "camera_buffer": {
+    "enabled": true,
+    "max_age_ms": 250,
+    "timeout_seconds": 10
   }
 }

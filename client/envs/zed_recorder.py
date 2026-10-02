@@ -46,12 +46,12 @@ def release_zed_from_reader(camera_reader, serial):
     if camera_reader is None:
         return False
     serial = normalize_zed_serial(serial)
-    cam = getattr(camera_reader, "camera_dict", {}).pop(serial, None)
-    if cam is None:
-        return False
     stop_bg = getattr(camera_reader, "stop_background_reading", None)
     if stop_bg is not None:
         stop_bg()
+    cam = getattr(camera_reader, "camera_dict", {}).pop(serial, None)
+    if cam is None:
+        return False
     cam.disable_camera()
     time.sleep(0.5)  # the SDK frees the USB device asynchronously
     logger.info("ZedRecorder: released ZED %s from the policy camera reader", serial)

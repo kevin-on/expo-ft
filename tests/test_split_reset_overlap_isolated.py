@@ -50,6 +50,7 @@ class SplitOverlapTests(unittest.TestCase):
         exec(compile(ast.Module(body=[klass], type_ignores=[]), '<reset>', 'exec'), ns)
         env = ns['DroidEnv']()
         env.reset_random = True
+        env.camera_buffer = {}
         env._before_reset = lambda: calls.append('before')
         env._robot = NS(get_joint_positions=lambda: calls.append('joints') or [0] * 7)
         env.prev_obs = {'robot_state': {'joint_positions': [0] * 7}}

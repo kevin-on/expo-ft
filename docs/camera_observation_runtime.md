@@ -36,3 +36,19 @@ New WS/inference endpoints negotiate `ws-model-frame-v1` before environment
 construction. Update both endpoints together; old binaries must not silently
 apply their own mirror or omit the WS transform. `eval_droid_policy --mirror_y`
 is superseded by the WS robot JSON and now rejects a true value.
+
+## Latest-frame mode
+
+`camera_buffer: {"enabled": true, "max_age_ms": 250, "timeout_seconds": 10}`
+uses one producer per robot, a persistent parallel reader pool, and one latest
+complete side/wrist slot. Crop/resize runs before publishing. Observation reads
+reuse those prepared images but read robot state freshly; images are not mutated
+once published. Episode video retains the raw images selected by observations,
+not every background frame. The polling rate follows the slowest configured
+camera FPS. Reused frames are permitted and identifiable by SDK timestamps.
+
+Reset sets a minimum SDK frame timestamp; no pre-reset frame passes that barrier.
+Missing, stale, future-dated or failed frames surface an error rather than silently
+running on old pixels. SDK timestamps are host-reception time, not sensor exposure
+start. Hardware mode changes/recording stop the producer before touching the SDK.
+SVO recording reads synchronously. Collection also disables this cache explicitly.

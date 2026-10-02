@@ -47,6 +47,7 @@ class DroidEnv(RobotEnv):
         async_video = False,
         video_encoder_threads = 2,
         camera_crops = None,
+        camera_buffer = None,
         camera_intrinsics = None,
         camera_extrinsics = None,
         record_camera = None,
@@ -117,12 +118,32 @@ class DroidEnv(RobotEnv):
             ) if async_video and video_dir else None
         )
 
+        self.camera_buffer = dict(camera_buffer or {})
+        if self.camera_buffer.get('enabled', False):
+            rates = [v.get('camera_fps', 15) for v in kwargs.get('camera_kwargs', {}).values()]
+            self.camera_reader.configure_buffer(
+                self._prepare_camera_images, fps=min(rates or [15]),
+                max_age_ms=self.camera_buffer.get('max_age_ms', 250),
+                timeout=self.camera_buffer.get('timeout_seconds', 10))
+
+    def _prepare_camera_images(self, data):
+        # Camera worker reads static calibration only, never robot state or episode state.
+        intrinsics = {}
+        for camera in self.camera_reader.camera_dict.values():
+            intrinsics.update({key: value['cameraMatrix'] for key, value in camera.get_intrinsics().items()})
+        raw = dict(data, camera_intrinsics=intrinsics)
+        ids = [key for key in (self.side_camera_id, self.wrist_camera_id) if key in data.get('image', {})]
+        images, intrinsics = prepare_images(raw, ids, self.camera_crops, self.camera_resolutions, self.image_size)
+        return dict(data, prepared_images=images, prepared_intrinsics=intrinsics)
+
     def reset(self, *, return_observation=True):
         self._before_reset()
         self._steps_since_reset = 0
         self._raw_frame_buffer = []
         self._record_frame_buffer = []
         super().reset(randomize=self.reset_random)
+        if self.camera_buffer.get('enabled', False):
+            self.camera_reader.require_fresh(time.time_ns()/1e6)
         # Deferred rollout reads its first camera frame only after learner updates.
         observation = self.get_observation() if return_observation else None
         logger = logging.getLogger(__name__)
@@ -217,8 +238,11 @@ class DroidEnv(RobotEnv):
 
     def transform_observation(self, raw_obs):
         # match the input of DroidDataset
-        images, intr = prepare_images(raw_obs, (self.side_camera_id, self.wrist_camera_id),
-                                      self.camera_crops, self.camera_resolutions, self.image_size)
+        if 'prepared_images' in raw_obs and all(k in raw_obs['prepared_images'] for k in (self.side_camera_id, self.wrist_camera_id)):
+            images, intr = raw_obs['prepared_images'], raw_obs['prepared_intrinsics']
+        else:
+            images, intr = prepare_images(raw_obs, (self.side_camera_id, self.wrist_camera_id),
+                                          self.camera_crops, self.camera_resolutions, self.image_size)
         side_img, wrist_img = images[self.side_camera_id], images[self.wrist_camera_id]
         data_dict = {
             "exterior_image_1_left": side_img,
