@@ -5,6 +5,13 @@ Run from the `multi-robot` source and its matching OpenPI checkout
 This adds an eval export/receiver; it does not change training checkpoint writes.
 Do not merge or substitute the older `checkpoint-config` eval implementation.
 
+New exports are saved as `checkpoints/<step>/trainable_weights.bin`, with unchanged
+binary contents and common `assets/` / `model_config/` files. Existing
+`checkpoints/<step>/eval/weights.bin` files remain readable without conversion.
+The sender/receiver `--weights` argument accepts either file or the checkpoint
+directory (new filename preferred). SFT packets can also initialize online FT
+with a local frozen base; see [model configuration](model_config.md).
+
 ## Modes and storage
 
 The server starts with local `--base-params` in **CPU RAM**, no GPU model.
@@ -38,7 +45,7 @@ comparison and writes. `E` also trusts that saved state without repeating disk
 verification. Every newly accepted checkpoint resets this state, even if its
 destination path is unchanged. This session-local state assumes saved files are
 not externally removed or modified. Loading `--weights` directly from its canonical
-`<experiments-root>/<checkpoint_path>/eval/weights.bin` starts as `Saved`, enabling
+`<experiments-root>/<checkpoint_path>/trainable_weights.bin` starts as `Saved`, enabling
 `E` immediately without saving or re-reading the file for comparison. A file loaded
 from elsewhere still requires `S` to persist it at the path recorded for eval.
 `0`, `1`, and Space start a ready robot or both ready robots. They do not queue
@@ -64,7 +71,7 @@ existing run/step is rejected, never silently overwritten.
     assets/config.json             # source SFT recipe, unchanged
     assets/<asset-id>/norm_stats.json
     model_config/config.json       # online only, unchanged from learner
-    eval/weights.bin               # required before every eval
+    trainable_weights.bin               # required before every eval
   eval/<eval-id>/
     record.json
     config/eval_config.json
@@ -97,7 +104,7 @@ rates or checkpoint lists are stored in this record; derive them from
 does not indicate that a full training/resume checkpoint has been collected.
 WS videos remain on the WS under the specified video root and eval ID.
 No optimizer, replay, temperature, training target actor, or frozen base is saved
-in `weights.bin`. Online exports contain rollout actor, batch encoder, edit actor,
+in `trainable_weights.bin`. Online exports contain rollout actor, batch encoder, edit actor,
 and **target** critic; SFT exports contain the inference actor. Array names,
 shape/dtype/offsets, format version and frozen-base XXH3-128 are inside the file.
 Common file text travels in the envelope so saved weights can also be re-sent by
@@ -144,7 +151,7 @@ python -m expo_ft.eval.server \
   --robots 0 1 --episodes 30
 ```
 
-The optional `--weights /.../eval/weights.bin` loads a saved packet into RAM.
+The optional `--weights /.../trainable_weights.bin` loads a saved packet into RAM.
 `--platform cpu` is for isolated testing only. Do not run actual models on the robot WS.
 
 DeltaAI compute, sender (CPU-only, same runtime/source and existing sender mailbox):
@@ -173,7 +180,7 @@ Re-sending `--weights` preserves its embedded path/ID and does not allow overrid
 Prototype `EXPOEV01` packets predate relative-path metadata; re-export those rather
 than guessing a new destination. The current envelope is `EXPOEV02`.
 SFT `--replan-steps` defaults to 8; online uses its checkpoint-owned value.
-`--weights /.../eval/weights.bin` re-sends an existing export instead of extracting
+`--weights /.../trainable_weights.bin` re-sends an existing export instead of extracting
 again. Sender checks receiver admission before reading model data. Finite transfer
 reservations prevent a dead sender from blocking eval forever; expired sends must
 be retried, not automatically installed. See sidecar quotas/timeouts for large

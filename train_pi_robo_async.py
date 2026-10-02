@@ -87,6 +87,7 @@ config_flags.DEFINE_config_file(
 
 
 flags.DEFINE_string("initial_sft_checkpoint", "", "Initial completed SFT checkpoint")
+flags.DEFINE_string("initial_sft_base", "", "Local frozen base params/ for compact SFT initialization.")
 
 
 def main(_):

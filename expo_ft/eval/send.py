@@ -14,7 +14,7 @@ def main():
     p.add_argument('--mailbox',required=True)
     source=p.add_mutually_exclusive_group(required=True)
     source.add_argument('--checkpoint',type=Path)
-    source.add_argument('--weights',type=Path,help='Previously saved eval/weights.bin')
+    source.add_argument('--weights',type=Path,help='Saved trainable_weights.bin or checkpoint directory (legacy eval/weights.bin accepted)')
     p.add_argument('--kind',choices=['sft','online'],default='sft')
     p.add_argument('--checkpoint-path',help='Checkpoint path relative to the experiments root; preserved verbatim')
     p.add_argument('--training-run-id',help='Registered training run ID')

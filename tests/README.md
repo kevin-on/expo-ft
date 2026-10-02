@@ -132,6 +132,18 @@ Retained evidence, with distinct scopes:
 Keep these bundles and live relay auxiliary files; they are not disposable logs.
 
 - `test_model_config.py`: SFT/EXPO metadata, camera omission, override drift, resume and normalization checks (CPU in the full learner environment).
+- The model-config and remote-eval suites also cover compact SFT initialization,
+  base/schema/config mismatch rejection, packet-only normalization, full/compact
+  metadata relocation, and new/legacy weight filenames.
+- `gpu/trainable_checkpoint.py`: real full/compact SFT online initialization,
+  exact initial parameter hashes, inference and one-update parity, then an
+  independent online checkpoint restore. Run `export` on CPU and `full`, `compact`,
+  `restore` in separate GPU processes. Use node-local `--output` scratch for the
+  test weights/checkpoint and persistent `--reports` for validation evidence.
+  Parameters, transformed inputs and RNG must match exactly. If cross-process
+  GPU action comparisons need a larger `--action-atol`, first measure the same
+  full checkpoint twice (`full --inference-only` in separate output directories);
+  retain that repeat-control difference alongside the comparison results.
 - `gpu/checkpoint_config.py`: real SFT inference, one online update and independent checkpoint restore/action parity, using recorded observations only.
 
 If the read-only compute image lacks pytest, install it into node-local scratch:

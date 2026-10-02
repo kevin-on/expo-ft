@@ -70,6 +70,7 @@ def main():
     p.add_argument('--checkpoint-dir',type=Path,required=True)
     p.add_argument('--policy-kind',choices=['sft','online'],default='sft')
     p.add_argument('--initial-sft-checkpoint',type=Path)
+    p.add_argument('--initial-sft-base',type=Path)
     p.add_argument('--robots',type=int,nargs='+',choices=[0,1],default=[0,1])
     p.add_argument('--episodes',type=int,default=10)
     p.add_argument('--replan-steps',type=int)
@@ -92,7 +93,8 @@ def main():
     from expo_ft.env.checkpoint_policy import SFTPolicy, OnlinePolicy
     print('Loading checkpoint configuration and shared model...',flush=True)
     if a.policy_kind=='online':
-        policy=OnlinePolicy(a.checkpoint_dir,task=task,initial_sft_checkpoint=a.initial_sft_checkpoint,seed=a.seed)
+        policy=OnlinePolicy(a.checkpoint_dir,task=task,initial_sft_checkpoint=a.initial_sft_checkpoint,
+                            initial_sft_base=a.initial_sft_base,seed=a.seed)
         replan=policy.record['replan_steps']
         if a.replan_steps is not None and a.replan_steps != replan: p.error('replan-steps differs from checkpoint')
     else:

@@ -31,6 +31,7 @@ def get_config():
     config.batch_split = 1
 
     config.initial_sft_checkpoint = ""
+    config.initial_sft_base = ""  # Local base params/ when initializing from trainable_weights.bin.
     config.pi05_learning_rate = 2.5e-5  # Separate from the EXPO edit actor_lr.
     config.pi05_adam_b1 = 0.9
     config.pi05_adam_b2 = 0.95

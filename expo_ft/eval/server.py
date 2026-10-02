@@ -15,7 +15,7 @@ import uuid
 
 from expo_ft.distributed.buffer import send_packet, receive_packet
 from expo_ft.distributed.channel import Channel
-from .checkpoint import load_base, manifest, location, read_file, save, BaseIdentity, within
+from .checkpoint import load_base, manifest, location, read_file, save, BaseIdentity, within, weights_path, WEIGHTS_NAME, LEGACY_WEIGHTS_NAME
 
 
 class Session:
@@ -24,12 +24,14 @@ class Session:
         self.lock = threading.RLock()
         self.mode, self.payload, self.meta = 'receive', None, None
         self.saved, self.notice, self.request = 'RAM only', 'Waiting for checkpoint', None
+        self.saved_path = None
         self.error = None
         self.progress = None
         self.receive_armed = False
 
     def load_saved(self, path):
         """Load the startup checkpoint; trust an existing canonical disk copy."""
+        path = weights_path(path)
         with self.lock:
             if self.mode != 'receive' or self.payload is not None:
                 raise RuntimeError('Local checkpoint loading requires an empty idle session')
@@ -42,8 +44,10 @@ class Session:
             self.cancel(request, 'Local checkpoint load failed')
             raise
         with self.lock:
-            target = location(self.root, self.meta) / 'eval/weights.bin'
-            self.saved = 'Saved' if Path(path).resolve() == target.resolve() else 'Loaded from disk'
+            step = location(self.root, self.meta)
+            targets = (step / WEIGHTS_NAME, step / LEGACY_WEIGHTS_NAME)
+            self.saved = 'Saved' if any(Path(path).resolve() == target.resolve() for target in targets) else 'Loaded from disk'
+            self.saved_path = str(path) if self.saved == 'Saved' else None
             self.notice = str(path)
 
     def toggle_receive(self):
@@ -78,6 +82,7 @@ class Session:
                 old = self.payload
                 self.payload, self.meta = payload, meta
                 self.saved, self.mode, self.request = 'RAM only', 'receive', None
+                self.saved_path = None
                 self.notice = 'Checkpoint ready'
             if old is not None: old.close()
         except BaseException:
@@ -105,7 +110,7 @@ class Session:
             if self.saved == 'Saved':
                 # The immutable RAM checkpoint was already persisted in this
                 # session. accept() invalidates this state on every replacement.
-                self.notice = str(location(self.root,self.meta)/'eval/weights.bin')
+                self.notice = self.saved_path
                 return True
             self.mode, self.saved = 'saving', 'Saving'
         try:
@@ -115,12 +120,13 @@ class Session:
             return False
         with self.lock:
             self.saved, self.notice, self.mode = 'Saved', str(path), 'receive'
+            self.saved_path = str(path)
         return True
 
     def snapshot(self):
         with self.lock:
             return dict(mode=self.mode,meta=self.meta,saved=self.saved,notice=self.notice,progress=self.progress,
-                        receive_armed=self.receive_armed)
+                        receive_armed=self.receive_armed, saved_path=self.saved_path)
 
     def close(self):
         if self.payload is not None: self.payload.close();self.payload=None
@@ -235,7 +241,7 @@ def lines(session, worker, episodes):
     result=[f"Remote Checkpoint Eval   |   {'EVAL' if worker else 'RECEIVE / SAVE'}",'']
     if m:
         result += [f"Run     {m['training_run_id']}",f"Checkpoint {m['checkpoint_path']}    Policy {m['kind']}",
-                   f"Storage {s['saved']}",f"Path    {location(session.root,m)/'eval/weights.bin'}"]
+                   f"Storage {s['saved']}",f"Path    {s['saved_path'] or location(session.root,m)/WEIGHTS_NAME}"]
     else: result += ['Checkpoint   None']
     reception = ('Transferring; further offers blocked' if s['mode']=='receiving' else
                  'Blocked during '+s['mode'] if s['mode']!='receive' else
@@ -270,7 +276,7 @@ def main():
     p.add_argument('--mailbox',required=True)
     p.add_argument('--base-params',type=Path,required=True)
     p.add_argument('--experiments-root',type=Path,default=Path('/iliad/u/kevinon/experiments/expo-ft'))
-    p.add_argument('--weights',type=Path,help='Start from an already saved weights.bin')
+    p.add_argument('--weights',type=Path,help='Saved trainable_weights.bin or checkpoint directory (legacy eval/weights.bin accepted)')
     p.add_argument('--robots',type=int,nargs='+',choices=[0,1],default=[0,1])
     p.add_argument('--episodes',type=int,default=30,help='Default for the episode-count prompt shown before each eval')
     p.add_argument('--seed',type=int,default=42)

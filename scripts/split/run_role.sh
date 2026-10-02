@@ -26,6 +26,7 @@ if [[ "$ROLE" == learner ]]; then
     CACHE_TAG=sync-EXPOLearner-n$DELTA_GPUS
     RESOURCES=(-c "$DELTA_CPUS" --mem="$DELTA_MEM" --gpus="$DELTA_GPUS")
     CHECKPOINT=${DELTA_CHECKPOINT:-$STAGE/checkpoint}
+    BASE_PARAMS=${DELTA_BASE_PARAMS:-}
     NODE_COUNT=${DELTA_NODE_COUNT:-1}
     if [[ "$NODE_COUNT" == 2 ]]; then
         NODE=${DELTA_NODES:?Set DELTA_NODES to the two allocated hosts}
@@ -42,6 +43,7 @@ else
     CACHE_TAG=split-inference-n1
     RESOURCES=(-c "$ILIAD_CPUS" --mem="$ILIAD_MEM" --gres=gpu:h200:1)
     CHECKPOINT=${ILIAD_CHECKPOINT:-$STAGE/checkpoint}
+    BASE_PARAMS=${ILIAD_BASE_PARAMS:-}
 fi
 if ! "$COMPUTE"; then
     [[ -z ${SLURM_JOB_ID:-} ]] || { echo 'Run this command on the login node, outside srun' >&2; exit 1; }
@@ -60,9 +62,25 @@ if [[ "$ROLE" == learner ]]; then RANK=${SLURM_PROCID:-0}; fi
     echo "Expected Slurm job $JOB on $NODE" >&2; exit 1;
 }
 for file in "$IMAGE" "$SOURCE/train_pi_robo.py" "$PERSIST/link/transport-$ROLE.json" \
-    "$PERSIST/link/token" "$PERSIST/link/cert.pem" "$PERSIST/link/key.pem" \
-    "$CHECKPOINT/assets/$ASSET_ID/norm_stats.json"; do require_file "$file"; done
-[[ -d "$CHECKPOINT/params" && -d "$STAGE/model-cache" ]] || exit 1
+    "$PERSIST/link/token" "$PERSIST/link/cert.pem" "$PERSIST/link/key.pem"; do require_file "$file"; done
+[[ -d "$STAGE/model-cache" ]] || exit 1
+SFT_ARGS=()
+if [[ -d "$CHECKPOINT/params" ]]; then
+    require_file "$CHECKPOINT/assets/$ASSET_ID/norm_stats.json"
+else
+    if [[ -d "$CHECKPOINT" ]]; then
+        if [[ -f "$CHECKPOINT/trainable_weights.bin" ]]; then
+            CHECKPOINT=$CHECKPOINT/trainable_weights.bin
+        else
+            CHECKPOINT=$CHECKPOINT/eval/weights.bin
+        fi
+    fi
+    require_file "$CHECKPOINT"
+    [[ -n "$BASE_PARAMS" && -d "$BASE_PARAMS" ]] || {
+        echo 'Compact SFT requires DELTA_BASE_PARAMS / ILIAD_BASE_PARAMS (local base params/)' >&2; exit 1;
+    }
+    SFT_ARGS=(--initial_sft_base=/initial-sft-base)
+fi
 umask 077
 # Hold one role per run; transport also refuses conflicting listener ports.
 if [[ "$RANK" == 0 ]]; then
@@ -100,6 +118,7 @@ export APPTAINERENV_EXPO_PROCESS_COUNT=$NODE_COUNT APPTAINERENV_EXPO_PROCESS_ID=
 export APPTAINERENV_EXPO_LOCAL_DEVICE_COUNT=4
 export APPTAINERENV_PYTHONPATH=/opt/expo-ft:/opt/expo-ft/expo_ft/agents/vla/openpi/src:/opt/expo-ft/expo_ft/agents/vla/openpi/packages/openpi-client/src
 BIND=$SOURCE:/opt/expo-ft:ro,$CHECKPOINT:/checkpoint:ro,$STAGE/model-cache:/model-cache
+[[ ${#SFT_ARGS[@]} == 0 ]] || BIND+=,$BASE_PARAMS:/initial-sft-base:ro
 BIND+=,$PERSIST/link:/link:ro,$PERSIST:/output/$RUN,$LOCAL/cache:/cache,$LOCAL/mailbox:/mailbox
 BIND+=,$STAGE/$JAX_CACHE_NAME:/home/kon/.cache/jax/$CACHE_TAG
 [[ "$ROLE" != learner ]] || BIND+=,$DEMO:/demo:ro
@@ -156,7 +175,7 @@ done
 [[ -f "$LOCAL/mailbox/transport-ready.json" ]] || { echo 'Transport startup timeout' >&2; exit 1; }
 fi
 ARGS=(--config=configs/model/expo_ft_pi_config.py --config_task=configs/task/pick.py
-    --initial_sft_checkpoint=/checkpoint --num_robot="${NUM_ROBOTS:-2}" --replan_steps=8 --delay=0 --update_type=episode
+    --initial_sft_checkpoint=/checkpoint "${SFT_ARGS[@]}" --num_robot="${NUM_ROBOTS:-2}" --replan_steps=8 --delay=0 --update_type=episode
     --split_session="$SESSION" --split_mailbox=/mailbox --seed=42 --run_name="$RUN" --split_role="$ROLE")
 if [[ "$ROLE" == learner ]]; then
     if [[ "$RANK" == 0 ]]; then

@@ -9,7 +9,7 @@ from unittest import mock
 
 import numpy as np
 
-from expo_ft.eval.checkpoint import pack, arrays, save, read_file, manifest, HEADER
+from expo_ft.eval.checkpoint import pack, arrays, save, read_file, read_metadata, manifest, HEADER
 from expo_ft.eval.server import Session, receiver, EvalProcess, prepare_output, lines
 
 
@@ -19,6 +19,37 @@ def payload(step='10', value=1):
 
 
 class EnvelopeTest(unittest.TestCase):
+    def test_legacy_step_and_file_load_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as folder, payload() as b:
+            path = save(b, folder)
+            legacy = path.parent/'eval/weights.bin'
+            legacy.parent.mkdir(); path.rename(legacy)
+            self.assertEqual(read_metadata(legacy.parent.parent), manifest(b)['metadata'])
+            for source in (legacy, legacy.parent.parent):
+                s = Session(None, folder, validator=lambda *_: None)
+                try:
+                    s.load_saved(source)
+                    self.assertEqual(s.saved, 'Saved')
+                    self.assertIn(f'Path    {legacy}', '\n'.join(lines(s, None, 20)))
+                    self.assertTrue(s.begin_eval()); s.end_eval()
+                    self.assertTrue(s.persist())
+                    self.assertFalse(path.exists())
+                finally:
+                    s.close()
+
+    def test_new_filename_does_not_bypass_legacy_conflict(self):
+        with tempfile.TemporaryDirectory() as folder, payload() as b:
+            path = save(b, folder)
+            legacy = path.parent/'eval/weights.bin'
+            legacy.parent.mkdir(); path.rename(legacy)
+            with payload(value=2) as different:
+                with self.assertRaisesRegex(ValueError, 'Different weights'):
+                    save(different, folder)
+            self.assertFalse(path.exists())
+            self.assertEqual(save(b, folder), path)
+            with read_file(path.parent) as loaded:
+                self.assertEqual(loaded.digest(), b.digest())
+
     def test_canonical_local_weights_enable_eval_without_save_or_comparison(self):
         with tempfile.TemporaryDirectory() as folder, payload() as b:
             path=save(b,folder)
@@ -41,7 +72,7 @@ class EnvelopeTest(unittest.TestCase):
                 s.load_saved(path)
                 self.assertEqual(s.saved,'Loaded from disk');self.assertFalse(s.begin_eval())
                 self.assertTrue(s.persist());self.assertTrue(s.begin_eval())
-                self.assertTrue((Path(destination)/'sft/run-a/checkpoints/10/eval/weights.bin').is_file())
+                self.assertTrue((Path(destination)/'sft/run-a/checkpoints/10/trainable_weights.bin').is_file())
                 s.end_eval()
             finally:s.close()
 
@@ -58,7 +89,7 @@ class EnvelopeTest(unittest.TestCase):
     def test_roundtrip_and_no_overwrite(self):
         with tempfile.TemporaryDirectory() as folder, payload() as b:
             target=save(b,folder)
-            self.assertEqual(target,Path(folder)/'sft/run-a/checkpoints/10/eval/weights.bin')
+            self.assertEqual(target,Path(folder)/'sft/run-a/checkpoints/10/trainable_weights.bin')
             self.assertEqual(save(b,folder),target)
             with read_file(target) as restored:
                 self.assertEqual(restored.digest(),b.digest())
@@ -180,7 +211,7 @@ class EnvelopeTest(unittest.TestCase):
             meta=dict(kind='online',training_run_id='registered-id',checkpoint_path=path,
                 hash_algorithm='xxh3_128',files={'assets/config.json':'original text'},replan_steps=8)
             s.toggle_receive();s.offer('a',10);s.accept('a',pack({},meta));self.assertTrue(s.persist());self.assertTrue(s.begin_eval())
-            self.assertTrue((Path(folder)/path/'eval/weights.bin').is_file())
+            self.assertTrue((Path(folder)/path/'trainable_weights.bin').is_file())
             out,opts=prepare_output(s,{'client_video_dir':'/unused/videos'})
             record=json.loads((out/'record.json').read_text())
             self.assertEqual(out.parent,Path(folder)/'eval')

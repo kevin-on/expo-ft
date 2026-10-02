@@ -68,6 +68,43 @@ class FlexibleCheckpointWeightLoader:
         return openpi_weight_loaders._merge_params(loaded, params, missing_regex=".*lora.*")
 
 
+@dataclasses.dataclass(frozen=True)
+class TrainableCheckpointWeightLoader:
+    """SFT-only compact initialization; reuse eval's frozen-base and schema checks."""
+
+    weights_path: str
+    base_params_path: str
+    recipe: dict
+    norm_sha256: str
+
+    def load(self, params: Any) -> Any:
+        import hashlib
+        import json
+        import ml_dtypes
+        from openpi.models.model import restore_params
+        from expo_ft.eval import checkpoint
+        from expo_ft.eval.model import merge_actor
+        # Own the arrays before closing the anonymous RAM mapping. The online
+        # optimizer may retain these arrays beyond the loader's lifetime.
+        with checkpoint.read_file(self.weights_path) as payload:
+            with checkpoint.arrays(payload) as (trees, meta):
+                if meta['kind'] != 'sft' or set(trees) != {'actor'}:
+                    raise ValueError('Expected SFT trainable weights with only actor parameters')
+                trained = jax.tree.map(lambda a: np.array(a, copy=True), trees['actor'])
+        cfg, _ = checkpoint.config_and_norm(meta)
+        asset = cfg.data.assets.asset_id or cfg.data.repo_id
+        recipe = json.loads(meta['files']['assets/config.json'])
+        norm = meta['files']['assets/' + asset + '/norm_stats.json']
+        if recipe != self.recipe or hashlib.sha256(norm.encode()).hexdigest() != self.norm_sha256:
+            raise ValueError('SFT config/normalization changed after initialization was configured')
+        base = restore_params(self.base_params_path, restore_type=np.ndarray, dtype=ml_dtypes.bfloat16)
+        checkpoint.BaseIdentity().validate_tree(base, meta)
+        loaded = merge_actor(base, trained, cfg)
+        # merge_actor already requires every leaf, including all LoRA parameters.
+        # Cast to the same reference dtypes as the full-checkpoint loader.
+        return openpi_weight_loaders._merge_params(loaded, params, missing_regex=r'(?!)')
+
+
 def init_logging() -> None:
     """Custom logging format for better readability."""
     level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
