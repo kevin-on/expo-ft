@@ -110,7 +110,7 @@ class BlankCameraTests(unittest.TestCase):
         side = np.full((360, 640, 3), 73, np.uint8)
         self.reader.read_cameras.return_value = ({'image': {config['side_camera_id']: side}}, {})
         env = DroidEnv(**config)
-        self.camera.assert_called_once_with({}, ['29838012'], 'TEMP_WRIST_ROBOT_1')
+        self.camera.assert_called_once_with({}, ['29838012'], 'TEMP_WRIST_ROBOT_1', camera_views={'29838012':['left'], 'TEMP_WRIST_ROBOT_1':['left']})
         self.rpc.assert_called_once_with(ip_address='172.16.0.1', port=4243, launch=False)
         raw = env.get_raw_observation()
         self.assertIs(raw['image'][config['side_camera_id']], side)
@@ -128,7 +128,7 @@ class BlankCameraTests(unittest.TestCase):
 
     def test_all_blank_views_work_when_reader_has_no_image_dictionary(self):
         env = DroidEnv(**self.config, blank_camera_serials=['side', 'wrist'])
-        self.camera.assert_called_once_with({}, [], 'wrist')
+        self.camera.assert_called_once_with({}, [], 'wrist', camera_views={'side':['left'], 'wrist':['left']})
         obs = env.get_observation()
         for key in ('exterior_image_1_left', 'exterior_image_2_left', 'wrist_image_left'):
             self.assertEqual(obs[key].shape, (180, 320, 3))
@@ -150,7 +150,7 @@ class BlankCameraTests(unittest.TestCase):
         wrist = np.full((180, 320, 3), 90, np.uint8)
         self.reader.read_cameras.return_value = ({'image': {'side_left': side, 'wrist_left': wrist}}, {})
         env = DroidEnv(**self.config)
-        self.camera.assert_called_once_with({}, ['side', 'wrist'], 'wrist')
+        self.camera.assert_called_once_with({}, ['side', 'wrist'], 'wrist', camera_views={'side':['left'], 'wrist':['left']})
         raw = env.get_raw_observation()
         self.assertIs(raw['image']['side_left'], side)
         self.assertIs(raw['image']['wrist_left'], wrist)

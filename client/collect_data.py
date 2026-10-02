@@ -522,6 +522,7 @@ def main(_):
         env_kwargs["video_dir"] = os.path.join(base_dir, "recordings")
     # Keep configured cameras open during teleop (eval may release unused cameras).
     env_kwargs.setdefault("release_unused_cameras", False)
+    env_kwargs['read_all_camera_eyes'] = bool(FLAGS.save_right_images)
     env = task_config.env(**env_kwargs)
     # Teleop collection ends episodes on success/detector/manual/bounds only, not the step budget.
     env.ignore_auto_reset = True

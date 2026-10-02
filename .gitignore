@@ -15,3 +15,7 @@ assets/
 client/.venv/
 
 log/
+
+# Local environment/source links in feature worktrees.
+/client/.venv
+/expo_ft/agents/vla/openpi

@@ -7,6 +7,7 @@ import numpy as np
 
 from droid.robot_env import RobotEnv
 from client.envs.utils import process_image_for_obs
+from client.envs.camera_config import selected_views, prepare_images
 from client.envs.zed_recorder import ZedRecorder, release_unused_zeds, release_zed_from_reader
 from client.real_utils.vis_utils import raw_frame_from_raw_obs, save_episode_video as save_episode_video_to_disk
 from client.real_utils.async_video import EpisodeVideoWriter
@@ -45,6 +46,7 @@ class DroidEnv(RobotEnv):
         video_dir = None,
         async_video = False,
         video_encoder_threads = 2,
+        camera_crops = None,
         camera_intrinsics = None,
         camera_extrinsics = None,
         record_camera = None,
@@ -57,6 +59,14 @@ class DroidEnv(RobotEnv):
             "robot_server_ip", "robot_server_port", "launch_controller", "camera_serials",
             "wrist_camera_serial", "camera_kwargs", "blank_camera_serials",
         ) if key in kwargs}
+        self.camera_crops = camera_crops or {}
+        self.camera_resolutions = {}
+        for camera_id, kind in ((side_camera_id, 'varied_camera'), (wrist_camera_id, 'hand_camera')):
+            settings = kwargs.get('camera_kwargs', {}).get(kind, {})
+            self.camera_resolutions[camera_id] = settings.get('capture_resolution', '1080p')
+        # Collection explicitly requests both eyes; online/eval select only their inputs.
+        if not kwargs.get('read_all_camera_eyes', False):
+            robot_kwargs['camera_views'] = selected_views((side_camera_id, wrist_camera_id))
         if kwargs.get("blank_camera_serials"):
             if (image_size is None or len(image_size) != 2
                     or any(not isinstance(n, (int, np.integer)) or n <= 0 for n in image_size)):
@@ -207,8 +217,9 @@ class DroidEnv(RobotEnv):
 
     def transform_observation(self, raw_obs):
         # match the input of DroidDataset
-        side_img = process_image_for_obs(raw_obs["image"][self.side_camera_id], bgr_to_rgb=True, image_size=self.image_size)
-        wrist_img = process_image_for_obs(raw_obs["image"][self.wrist_camera_id], bgr_to_rgb=True, image_size=self.image_size)
+        images, intr = prepare_images(raw_obs, (self.side_camera_id, self.wrist_camera_id),
+                                      self.camera_crops, self.camera_resolutions, self.image_size)
+        side_img, wrist_img = images[self.side_camera_id], images[self.wrist_camera_id]
         data_dict = {
             "exterior_image_1_left": side_img,
             "exterior_image_2_left": side_img,
@@ -218,18 +229,6 @@ class DroidEnv(RobotEnv):
             "prompt": self.language_instruction,
         }
         if "camera_intrinsics" in raw_obs and "camera_extrinsics" in raw_obs:
-            intr = dict(raw_obs["camera_intrinsics"])
-            if self.image_size is not None:
-                for cam_id in [self.side_camera_id, self.wrist_camera_id]:
-                    K = intr.get(cam_id)
-                    if K is not None and cam_id in raw_obs["image"]:
-                        img = raw_obs["image"][cam_id]
-                        h_orig, w_orig = img.shape[:2]
-                        sx, sy = self.image_size[1] / w_orig, self.image_size[0] / h_orig
-                        K = np.array(K, dtype=np.float64).copy()
-                        K[0, 0], K[1, 1] = K[0, 0] * sx, K[1, 1] * sy
-                        K[0, 2], K[1, 2] = K[0, 2] * sx, K[1, 2] * sy
-                        intr[cam_id] = K
             data_dict["camera_intrinsics"] = intr
             data_dict["camera_extrinsics"] = raw_obs["camera_extrinsics"]
         return data_dict

@@ -11,9 +11,18 @@
   "wrist_camera_id": "12841040_right",
   "spacemouse_device_path": "/dev/hidraw3",
   "bounds": [
-    [0.355, 0.550],
-    [0.035, 0.245],
-    [0.100, 0.450]
+    [
+      0.355,
+      0.55
+    ],
+    [
+      0.035,
+      0.245
+    ],
+    [
+      0.1,
+      0.45
+    ]
   ],
   "reset_joints": [
     0.18538,
@@ -28,12 +37,32 @@
     "hand_camera": {
       "image": true,
       "depth": false,
-      "left_only": false
+      "capture_resolution": "720p",
+      "camera_fps": 30
     },
     "varied_camera": {
       "image": true,
       "depth": false,
-      "left_only": true
+      "capture_resolution": "720p",
+      "camera_fps": 30
+    }
+  },
+  "camera_crops": {
+    "29838012_left": {
+      "720p": [
+        160,
+        89,
+        956,
+        538
+      ]
+    },
+    "12841040_right": {
+      "720p": [
+        158,
+        88,
+        960,
+        540
+      ]
     }
   }
 }
