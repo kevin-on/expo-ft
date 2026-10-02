@@ -14,6 +14,7 @@ python train_pi_robo_async.py \
     --offline_ratio=0 \
     --config=configs/model/expo_ft_pi_config.py \
     --initial_sft_checkpoint="${SFT_CHECKPOINT:?Set a completed SFT checkpoint}" \
+    --initial_sft_base="${SFT_BASE_PARAMS:-}" \
     --config.N=8 \
     --config.n_edit_samples=8 \
     --config.edit_scale=0.2 \

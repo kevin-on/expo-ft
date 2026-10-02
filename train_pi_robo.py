@@ -38,6 +38,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("initial_sft_checkpoint", "", "Completed SFT step; only asset relocation on resume.")
+flags.DEFINE_string("initial_sft_base", "", "Local frozen base params/ for compact SFT initialization.")
 
 flags.DEFINE_string("project_name", "expo-ft", "wandb project name.")
 flags.DEFINE_string("run_name", None, "Optional wandb run name.")

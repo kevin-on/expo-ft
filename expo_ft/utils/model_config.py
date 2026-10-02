@@ -37,35 +37,88 @@ LEGACY_FIELDS = ('pi05_config_name', 'pi05_resize_size', 'pi05_omit_image_keys',
                  'pi05_weight_loader_path', 'pi05_assets_dir', 'pi05_asset_id')
 
 
+def compact_sft_path(checkpoint):
+    """Explicit files select compact weights; full step directories keep their old behavior."""
+    from expo_ft.eval.checkpoint import weights_path
+    root = Path(checkpoint).resolve()
+    if root.is_file():
+        return root
+    if (root / 'params').is_dir():
+        return None
+    candidate = weights_path(root)
+    return candidate if candidate.is_file() else None
+
+
+def sft_files(checkpoint):
+    """Exact checkpoint-owned config/norm text, including RAM packet-only inputs."""
+    from expo_ft.eval.checkpoint import read_metadata
+    compact = compact_sft_path(checkpoint)
+    if compact is not None:
+        meta = read_metadata(compact)
+        if meta['kind'] != 'sft':
+            raise ValueError('Initial checkpoint must be SFT, not online trainable weights')
+        files = meta['files']
+        recipe = json.loads(files['assets/config.json'])
+    else:
+        root = Path(checkpoint).resolve()
+        recipe = sft_config.read_record(root)
+        files = {'assets/config.json': (root/'assets/config.json').read_text()}
+    cfg = sft_config.restore(recipe)
+    asset = cfg.data.assets.asset_id or cfg.data.repo_id
+    name = 'assets/' + asset + '/norm_stats.json'
+    from expo_ft.eval.checkpoint import common_path
+    common_path(name)
+    if compact is None:
+        stats = root / name
+        if not (root/'params').is_dir() or not stats.is_file():
+            raise ValueError('SFT checkpoint must contain params and its declared normalization asset')
+        files[name] = stats.read_text()
+    if name not in files:
+        raise ValueError('Missing declared SFT normalization asset')
+    return {'assets/config.json': files['assets/config.json'], name: files[name]}
+
+
 def load_sft(config):
     legacy = set(config).intersection(LEGACY_FIELDS)
     if legacy:
         raise ValueError(f'Remove duplicate SFT settings {sorted(legacy)}; use initial_sft_checkpoint')
     root = Path(config.initial_sft_checkpoint).resolve()
-    recipe = sft_config.read_record(root)
+    files = sft_files(root)
+    recipe = json.loads(files['assets/config.json'])
     cfg = sft_config.restore(recipe)
     if not getattr(cfg.data, 'use_cartesian_state', False) or cfg.data.output_action_dim != 7:
         raise ValueError('EXPO DROID requires Cartesian state and 7D velocity actions')
     asset_id = cfg.data.assets.asset_id or cfg.data.repo_id
-    stats = root / 'assets' / asset_id / 'norm_stats.json'
-    if not (root / 'params').is_dir() or not stats.is_file():
-        raise ValueError('SFT checkpoint must contain params and its declared normalization asset')
-    cfg = sft_config.with_assets(cfg, root)
-    return cfg, recipe, hashlib.sha256(stats.read_bytes()).hexdigest()
+    text = files['assets/' + asset_id + '/norm_stats.json']
+    if compact_sft_path(root) is not None:
+        from openpi.shared.normalize import deserialize_json
+        from expo_ft.eval.model import ram_config
+        cfg = ram_config(cfg, deserialize_json(text))
+    else:
+        cfg = sft_config.with_assets(cfg, root)
+    return cfg, recipe, hashlib.sha256(text.encode()).hexdigest()
 
 
 def build_online(config):
     cfg, recipe, norm_hash = load_sft(config)
     kwargs = dict(config)
     root = Path(kwargs.pop('initial_sft_checkpoint')).resolve()
+    base = kwargs.pop('initial_sft_base', '')
     cls = kwargs.pop('model_cls')
     # Explicit online Pi optimizer; SFT run length/schedule/EMA do not leak into online training.
     lr = kwargs.pop('pi05_learning_rate')
     adam = optimizer.AdamW(**{k: kwargs.pop('pi05_' + field) for k, field in
         [('b1', 'adam_b1'), ('b2', 'adam_b2'), ('eps', 'adam_eps'),
          ('weight_decay', 'weight_decay'), ('clip_gradient_norm', 'clip_gradient_norm')]})
-    from expo_ft.utils.train_utils import FlexibleCheckpointWeightLoader
-    cfg = dataclasses.replace(cfg, weight_loader=FlexibleCheckpointWeightLoader(str(root/'params')),
+    from expo_ft.utils.train_utils import FlexibleCheckpointWeightLoader, TrainableCheckpointWeightLoader
+    compact = compact_sft_path(root)
+    if compact is not None:
+        if not base or not Path(base).is_dir():
+            raise ValueError('Compact SFT initialization requires initial_sft_base pointing to local base params/')
+        loader = TrainableCheckpointWeightLoader(str(compact), str(Path(base).resolve()), recipe, norm_hash)
+    else:
+        loader = FlexibleCheckpointWeightLoader(str(root/'params'))
+    cfg = dataclasses.replace(cfg, weight_loader=loader,
         lr_schedule=optimizer.CosineDecaySchedule(warmup_steps=0, peak_lr=lr,
                                                  decay_steps=100_000, decay_lr=lr),
         optimizer=adam, ema_decay=None)
@@ -110,10 +163,12 @@ def read_record(step):
     return record
 
 
-def restore_config(record, initial_sft_checkpoint=None):
+def restore_config(record, initial_sft_checkpoint=None, initial_sft_base=None):
     config = ConfigDict(unpack(record['config']))
     if initial_sft_checkpoint:
         config.initial_sft_checkpoint = str(initial_sft_checkpoint)
+    if initial_sft_base:
+        config.initial_sft_base = str(initial_sft_base)
     _, recipe, norm_hash = load_sft(config)
     if recipe['resolved'] != record['sft']['resolved'] or norm_hash != record['norm_sha256']:
         raise ValueError('Initial SFT config/normalization differs from the online checkpoint')
@@ -141,6 +196,7 @@ def validate_agent(record, agent):
     def comparable(r):
         r = json.loads(json.dumps(r))
         r['config'].pop('initial_sft_checkpoint', None)
+        r['config'].pop('initial_sft_base', None)
         r.pop('policy_identity', None)
         r.pop('training', None)
         return r
@@ -159,7 +215,8 @@ def configure_training(flags):
         if any(flags[name].present for name in flags if name == 'config' or name.startswith('config.')):
             raise ValueError('Resume reads saved model config; remove --config and its overrides')
         record = read_record(steps[-1])
-        flags.config = restore_config(record, flags.initial_sft_checkpoint or None)
+        flags.config = restore_config(record, flags.initial_sft_checkpoint or None,
+                                      getattr(flags, 'initial_sft_base', '') or None)
         for key in ('replan_steps', 'num_robot'):
             if key not in flags:
                 if key == 'num_robot' and record[key] != 1:
@@ -176,6 +233,8 @@ def configure_training(flags):
     else:
         if flags.initial_sft_checkpoint:
             flags.config.initial_sft_checkpoint = flags.initial_sft_checkpoint
+        if getattr(flags, 'initial_sft_base', ''):
+            flags.config.initial_sft_base = flags.initial_sft_base
     record = make_record(flags.config, flags.config_task, flags.replan_steps, getattr(flags, 'num_robot', 1))
     record['training'] = {key: getattr(flags, key) for key in
         ('batch_size', 'utd_ratio', 'offline_ratio', 'num_updates', 'update_type', 'step_interval', 'seed') if key in flags}

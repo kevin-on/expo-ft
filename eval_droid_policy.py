@@ -38,6 +38,7 @@ config_flags.DEFINE_config_file(
 FLAGS = flags.FLAGS
 flags.DEFINE_enum("checkpoint_kind", "online", ["sft", "online"], "Checkpoint model kind")
 flags.DEFINE_string("initial_sft_checkpoint", "", "Relocate original SFT assets for online eval")
+flags.DEFINE_string("initial_sft_base", "", "Relocate local base params for compact SFT metadata")
 flags.DEFINE_string("dataset_path", "", "Path to DROID dataset (for example_action).")
 flags.DEFINE_integer("num_data", 1, "Number of episodes to load from dataset (only need 1 for example_action).")
 flags.DEFINE_integer("seed", 42, "Random seed.")
@@ -210,7 +211,8 @@ def main(_):
             FLAGS.only_base_actions = True
         else:
             agent = OnlinePolicy(FLAGS.checkpoint_dir, task=config_task,
-                                 initial_sft_checkpoint=FLAGS.initial_sft_checkpoint or None, seed=FLAGS.seed)
+                                 initial_sft_checkpoint=FLAGS.initial_sft_checkpoint or None,
+                                 initial_sft_base=FLAGS.initial_sft_base or None, seed=FLAGS.seed)
             if FLAGS.replan_steps != agent.record['replan_steps'] and FLAGS['replan_steps'].present:
                 raise ValueError("replan_steps differs from the online checkpoint")
             FLAGS.replan_steps = agent.record['replan_steps']

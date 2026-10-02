@@ -30,6 +30,33 @@ come from it. Removed `pi05_config_name`, `pi05_resize_size`, `pi05_omit_image_k
 `pi05_weight_loader_path`, `pi05_assets_dir`, `pi05_asset_id` are rejected rather
 than silently competing with the saved config.
 
+The same initialization accepts a compact SFT packet and local base params:
+
+```bash
+python train_pi_robo.py --config=configs/model/expo_ft_pi_config.py \
+  --initial_sft_checkpoint=/sft/run/checkpoints/4999/trainable_weights.bin \
+  --initial_sft_base=/models/pi05_base/params ...
+```
+
+This is the same packet produced by the remote-eval exporter. It contains every
+non-frozen SFT parameter, including trainable image-encoder weights (not just
+LoRA), the exact SFT config and normalization, and the XXH3-128 identity of the
+frozen base. The loader rejects an online packet, a different frozen base, missing
+or extra parameters, and incompatible shapes/config. It then creates the normal
+fresh online optimizer/critic/edit actor; no SFT optimizer is needed.
+
+The packet alone plus base params is sufficient; adjacent `assets/` files are not
+required for this input. A compact-only step directory is also accepted. If a
+directory has `params/`, it continues using the full checkpoint; pass the `.bin`
+file explicitly to select compact initialization. Legacy `eval/weights.bin` files
+and compact-only directories containing them remain readable.
+
+For `scripts/split/run_role.sh`, set `DELTA_CHECKPOINT` / `ILIAD_CHECKPOINT` to the
+compact packet (or its step) and `DELTA_BASE_PARAMS` / `ILIAD_BASE_PARAMS` to the
+respective local base `params/` directories. Both roles use the same content;
+physical paths may differ. The pick launchers use `SFT_CHECKPOINT` and optional
+`SFT_BASE_PARAMS`.
+
 EXPO's config retains critic/edit architecture and online learning settings.
 `actor_lr` controls the EXPO edit actor. The Pi optimizer is explicit:
 `pi05_learning_rate=2.5e-5`, constant schedule, AdamW b1=.9, b2=.95, eps=1e-8,
@@ -39,7 +66,7 @@ The SFT freeze filter (e.g. LoRA parameter selection) is retained, and
 `freeze_pi05_encoder` remains an online control.
 
 Learner and inference use the same SFT step and EXPO config. The split identity
-now includes the full EXPO config except the relocatable SFT directory, so
+now includes the full EXPO config except the relocatable SFT and base paths, so
 settings like `use_pnorm` cannot silently differ between peers.
 
 ## Online checkpoints, resume and eval
@@ -53,8 +80,11 @@ records batch/UTD/offline ratio/update/seed settings.
 Resume with the existing run directory and `--resume`; omit `--config` and its
 overrides. Saved model and learning settings are restored before initialization.
 GPU topology/ports/output paths are not taken from the checkpoint.
-`--initial_sft_checkpoint` may relocate original SFT assets; recipe and norm
+`--initial_sft_checkpoint` may relocate original SFT assets (full or compact), and
+`--initial_sft_base` may relocate local base params; recipe and norm
 content must match. The original checkpoint weights are loaded by Orbax on resume.
+Compact initialization does not replace full online resume checkpoints: optimizer,
+critic state, counters and replay still use the existing online checkpoint path.
 
 Single-robot eval:
 

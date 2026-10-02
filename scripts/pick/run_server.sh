@@ -19,6 +19,7 @@ python train_pi_robo.py \
     --config.n_edit_samples=8 \
     --config.edit_scale=0.2 \
     --initial_sft_checkpoint="${SFT_CHECKPOINT:?Set a completed SFT checkpoint}" \
+    --initial_sft_base="${SFT_BASE_PARAMS:-}" \
     --project_name=expo_ft_pick \
     --output_dir=./checkpoints/pick \
     --client_host="$CLIENT_IP" \

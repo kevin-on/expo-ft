@@ -117,7 +117,7 @@ def identity(agent, task_contract):
                                  'policy_metadata': agent.actor.train_config.policy_metadata,
                                  'sampling': sampling, 'task': task_contract,
                                  'online_config': {k: v for k, v in getattr(agent.actor, 'checkpoint_record', {}).get('config', {}).items()
-                                                   if k != 'initial_sft_checkpoint'}}))
+                                                   if k not in ('initial_sft_checkpoint', 'initial_sft_base')}}))
 
 
 def export_policy(agent, contract, version):

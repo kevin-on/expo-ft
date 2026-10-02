@@ -1,4 +1,4 @@
-"""Eval-only weight envelope. Arrays and their metadata share one sealed RAM file."""
+"""Portable trainable weights. Arrays and metadata share one sealed RAM file."""
 from contextlib import contextmanager
 import json
 import math
@@ -17,6 +17,33 @@ from expo_ft.distributed.buffer import Buffer
 HEADER = struct.Struct('<8sQQ')
 MAGIC = b'EXPOEV02'
 LIMIT = 16 * 1024**2
+WEIGHTS_NAME = 'trainable_weights.bin'
+LEGACY_WEIGHTS_NAME = 'eval/weights.bin'
+
+
+def weights_path(step):
+    """Prefer the shared checkpoint artifact; retain old eval checkpoint support."""
+    step = Path(step)
+    if step.is_file():
+        return step
+    target = step / WEIGHTS_NAME
+    return target if target.is_file() else step / LEGACY_WEIGHTS_NAME
+
+
+def read_metadata(path):
+    """Read only the bounded JSON header, without loading weight arrays into RAM."""
+    path = weights_path(path)
+    with path.open('rb') as f:
+        header = f.read(HEADER.size)
+        if len(header) != HEADER.size:
+            raise ValueError('Truncated weights')
+        magic, offset, length = HEADER.unpack(header)
+        if magic != MAGIC or offset < 64 or length > LIMIT or offset + length != path.stat().st_size:
+            raise ValueError('Invalid weights header')
+        f.seek(offset)
+        metadata = json.loads(f.read(length))['metadata']
+        _validate_metadata(metadata)
+        return metadata
 
 
 def leaves(tree, path=()):
@@ -65,6 +92,16 @@ def common_path(value):
     if path.is_absolute() or '..' in path.parts or path.parts[0] not in ('assets', 'model_config'):
         raise ValueError('Invalid common config/normalization path')
     return path
+
+
+def _validate_metadata(meta):
+    if meta.get('kind') != 'base':
+        identifier(meta['training_run_id']); relative_path(meta['checkpoint_path'])
+        if meta.get('kind') not in ('sft', 'online') or meta.get('hash_algorithm') != 'xxh3_128':
+            raise ValueError('Unknown evaluation format')
+        for name, text in meta['files'].items():
+            common_path(name)
+            if not isinstance(text, str): raise ValueError('Config must be text')
 
 
 def pack(trees, metadata):
@@ -120,14 +157,7 @@ def manifest(buffer):
                 raise ValueError('Array outside payload')
         if end != offset:
             raise ValueError('Unexpected weight bytes')
-        meta = result['metadata']
-        if meta.get('kind') != 'base':
-            identifier(meta['training_run_id']); relative_path(meta['checkpoint_path'])
-            if meta.get('kind') not in ('sft', 'online') or meta.get('hash_algorithm') != 'xxh3_128':
-                raise ValueError('Unknown evaluation format')
-            for name, text in meta['files'].items():
-                common_path(name)
-                if not isinstance(text, str): raise ValueError('Config must be text')
+        _validate_metadata(result['metadata'])
         return result
 
 
@@ -159,6 +189,7 @@ def fingerprint(tree):
 
 
 def read_file(path):
+    path = weights_path(path)
     b = Buffer.create(Path(path).stat().st_size)
     try:
         with Path(path).open('rb') as source, b.open() as target:
@@ -173,14 +204,15 @@ def save(buffer, root):
     """Publish weights last; an existing checkpoint is never overwritten."""
     info = manifest(buffer)['metadata']
     step = location(root, info)
-    folder = within(root, info['checkpoint_path']+'/eval'); folder.mkdir(parents=True, exist_ok=True)
-    target = within(root, info['checkpoint_path']+'/eval/weights.bin')
-    if target.exists():
-        digest = xxhash.xxh3_128()
-        with target.open('rb') as f:
-            while chunk := f.read(8*1024**2): digest.update(chunk)
-        if digest.hexdigest() != buffer.digest():
-            raise ValueError('Different weights already saved at this run/step')
+    step.mkdir(parents=True, exist_ok=True)
+    target = within(root, info['checkpoint_path']+'/'+WEIGHTS_NAME)
+    for existing in (target, within(root, info['checkpoint_path']+'/'+LEGACY_WEIGHTS_NAME)):
+        if existing.exists():
+            digest = xxhash.xxh3_128()
+            with existing.open('rb') as f:
+                while chunk := f.read(8*1024**2): digest.update(chunk)
+            if digest.hexdigest() != buffer.digest():
+                raise ValueError('Different weights already saved at this run/step')
     for name, text in info['files'].items():
         dest = within(root, str(relative_path(info['checkpoint_path'])/common_path(name)))
         if dest.exists() and dest.read_text() != text:
@@ -255,14 +287,13 @@ def export(checkpoint, kind, *, checkpoint_path, training_run_id, initial_sft=No
         extra = {}
         record = None
     else:
-        from expo_ft.utils.model_config import read_record, restore_config
+        from expo_ft.utils.model_config import read_record, restore_config, sft_files
         record = read_record(root)
         config = restore_config(record, initial_sft)
-        norm_root = Path(config.initial_sft_checkpoint)
+        files.update(sft_files(config.initial_sft_checkpoint))
         recipe = record['sft']; cfg = checkpoint_config.restore(recipe)
         files['model_config/config.json'] = (root/'model_config/config.json').read_text()
         # Initial SFT assets are retained at their normal relative paths.
-        files['assets/config.json'] = (norm_root/'assets/config.json').read_text()
         params = restore_tree(root/'params')
         state = restore_tree(root/'agent')
         # When checkpoint params contain EMA, actual rollout parameters remain
@@ -274,7 +305,8 @@ def export(checkpoint, kind, *, checkpoint_path, training_run_id, initial_sft=No
         replan_steps = record['replan_steps']
     asset = cfg.data.assets.asset_id or cfg.data.repo_id
     name = 'assets/'+asset+'/norm_stats.json'; common_path(name)
-    files[name] = (norm_root/name).read_text()
+    if kind == 'sft':
+        files[name] = (norm_root/name).read_text()
     if not 0 < replan_steps <= cfg.model.action_horizon: raise ValueError('Invalid replan steps')
     base, trained = split_actor(actor, cfg)
     meta = dict(kind=kind, training_run_id=training_run_id, checkpoint_path=checkpoint_path,
@@ -306,17 +338,26 @@ class BaseIdentity:
         self.hashes = {}
 
     def __call__(self, base, payload):
-        from openpi.training.checkpoint_config import describe
         meta = manifest(payload)['metadata']
         cfg, _ = config_and_norm(meta)
+        with arrays(base) as (trees, _):
+            actual = self.tree_hash(trees['base'], cfg)
+        if actual != meta['base_hash']:
+            raise ValueError('Local frozen base differs from checkpoint')
+
+    def validate_tree(self, base, meta):
+        """Same frozen-subset contract for eval buffers and owned online-init arrays."""
+        cfg, _ = config_and_norm(meta)
+        if self.tree_hash(base, cfg) != meta['base_hash']:
+            raise ValueError('Local frozen base differs from checkpoint')
+
+    def tree_hash(self, base, cfg):
+        from openpi.training.checkpoint_config import describe
         key = json.dumps(describe(cfg.freeze_filter),sort_keys=True)
         if key not in self.hashes:
-            with arrays(base) as (trees, _):
-                frozen, _ = split_actor(trees['base'], cfg)
-                self.hashes[key] = fingerprint(frozen)
-                del frozen
-        if self.hashes[key] != meta['base_hash']:
-            raise ValueError('Local frozen base differs from checkpoint')
+            frozen, _ = split_actor(base, cfg)
+            self.hashes[key] = fingerprint(frozen)
+        return self.hashes[key]
 
 
 def validate_base(base, payload):

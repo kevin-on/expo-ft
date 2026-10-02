@@ -21,10 +21,10 @@ class SFTPolicy:
 
 
 class OnlinePolicy:
-    def __init__(self, checkpoint, *, task, initial_sft_checkpoint=None, seed=42):
+    def __init__(self, checkpoint, *, task, initial_sft_checkpoint=None, initial_sft_base=None, seed=42):
         from expo_ft.utils.model_config import read_record, restore_config, check_task
         self.record = read_record(checkpoint)
-        config = restore_config(self.record, initial_sft_checkpoint)
+        config = restore_config(self.record, initial_sft_checkpoint, initial_sft_base)
         check_task(self.record, task, self.record['replan_steps'])
         self.agent = build_agent(config, task, self.record['replan_steps'], seed=seed,
                                  resume=True, num_robot=self.record['num_robot'])

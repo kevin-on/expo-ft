@@ -101,7 +101,7 @@ def build(base, payload, task, seed=42, *, base_verified=False):
         sample.update(state=np.zeros_like(replay.dataset_dict['state'][:1]), actions=np.zeros_like(replay.dataset_dict['actions'][:1]))
         obs, state_example, action = replay.convert_to_critic_format(sample)
         actor.action_dim, actor.state_dim = action.squeeze().shape[-1], state_example.squeeze().shape[-1]
-        kwargs = {k:v for k,v in config.items() if k not in ('model_cls','initial_sft_checkpoint','freeze_pi05_encoder') and not k.startswith('pi05_')}
+        kwargs = {k:v for k,v in config.items() if k not in ('model_cls','initial_sft_checkpoint','initial_sft_base','freeze_pi05_encoder') and not k.startswith('pi05_')}
         kwargs.update(actor=actor, actor_train_state=train_state, target_actor_params=None,
             action_horizon=cfg.model.action_horizon, mesh=mesh, freeze_encoder=freeze,
             data_sharding=data_sharding, replicated_sharding=replicated, default_prompt=task.language_instruction,

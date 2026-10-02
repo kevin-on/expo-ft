@@ -55,6 +55,120 @@ class ConfigTest(unittest.TestCase):
                     'image_mask': {k: True for k in ('base_0_rgb','left_wrist_0_rgb','right_wrist_0_rgb')}})
                 self.assertEqual(bool(transformed['image_mask']['left_wrist_0_rgb']), not off)
 
+    def compact(self, config, *, kind='sft', actor=None):
+        from expo_ft.eval import checkpoint as ck
+        import ml_dtypes
+        base = {'llm': np.ones((2,), ml_dtypes.bfloat16), 'encoder': np.zeros((2,), np.float32)}
+        cfg, _, _ = mc.load_sft(config)
+        frozen, _ = ck.split_actor(base, cfg)
+        trained = {'llm_lora': np.full((2,), 2, np.float32), 'encoder': np.full((2,), 3, np.float32)}
+        meta = dict(kind=kind, training_run_id='tiny', checkpoint_path='sft/tiny/checkpoints/1',
+                    hash_algorithm='xxh3_128', base_hash=ck.fingerprint(frozen),
+                    files=mc.sft_files(config.initial_sft_checkpoint), replan_steps=8)
+        with ck.pack({'actor': trained if actor is None else actor}, meta) as b:
+            # Deliberately save ONLY the packet; metadata must not require adjacent assets.
+            path = self.root/'standalone.bin'
+            with b.open() as src, path.open('wb') as dst:
+                dst.write(src.read())
+        return path, base, trained
+
+    def test_compact_config_norm_online_settings_and_relocation(self):
+        for off in (False, True):
+            with self.subTest(off=off):
+                config, _ = self.fixture(off)
+                config.pi05_learning_rate = 1e-5
+                record = mc.make_record(config, task_config(), 8)
+                path, _, _ = self.compact(config)
+                restored = mc.restore_config(record, path, self.root/'base')
+                (self.root/'base').mkdir(exist_ok=True)
+                kwargs, cfg, _, _ = mc.build_online(restored)
+                self.assertNotIn('initial_sft_base', kwargs)
+                self.assertEqual(cfg.lr_schedule.peak_lr, 1e-5)
+                self.assertEqual('left_wrist_0_rgb' in cfg.model.omit_image_keys, off)
+                full, _, full_hash = mc.load_sft(config)
+                compact, _, compact_hash = mc.load_sft(restored)
+                self.assertEqual(full_hash, compact_hash)
+                for key, stats in full.data.create(full.assets_dirs, full.model).norm_stats.items():
+                    actual = compact.data.create(compact.assets_dirs, compact.model).norm_stats[key]
+                    np.testing.assert_array_equal(stats.mean, actual.mean)
+                # Full -> compact changes only relocatable paths, including old records
+                # which predate the optional initial_sft_base field.
+                record['config'].pop('initial_sft_base', None)
+                expected = mc.make_record(restored, task_config(), 8)
+                from types import SimpleNamespace
+                mc.validate_agent(record, SimpleNamespace(actor=SimpleNamespace(checkpoint_record=expected)))
+
+    def test_compact_requires_base_and_rejects_online_packet(self):
+        config, _ = self.fixture()
+        path, _, _ = self.compact(config)
+        config.initial_sft_checkpoint = str(path)
+        with self.assertRaisesRegex(ValueError, 'initial_sft_base'):
+            mc.build_online(config)
+        self.compact(config, kind='online')
+        with self.assertRaisesRegex(ValueError, 'must be SFT'):
+            mc.load_sft(config)
+
+    def test_compact_loader_matches_full_and_rejects_bad_weights(self):
+        from flax import nnx
+        import jax
+        import ml_dtypes
+        from expo_ft.utils.train_utils import FlexibleCheckpointWeightLoader
+        from expo_ft.eval import checkpoint as ck
+        config, _ = self.fixture()
+        path, base, trained = self.compact(config)
+        config.initial_sft_checkpoint = str(path)
+        config.initial_sft_base = str(self.root/'base'); Path(config.initial_sft_base).mkdir()
+        _, cfg, _, _ = mc.build_online(config)
+        full = {'llm': base['llm'], **trained}
+        refs = jax.tree.map(lambda a: jax.ShapeDtypeStruct(a.shape, a.dtype), full)
+        class Tiny(nnx.Module):
+            def __init__(self):
+                for k, v in full.items(): setattr(self, k, nnx.Param(v))
+        with patch('openpi.models.model.restore_params', return_value=base), \
+                patch('flax.nnx.eval_shape', return_value=Tiny()), \
+                patch('expo_ft.utils.train_utils._restore_pi05_params', return_value=full):
+            loaded = cfg.weight_loader.load(refs)
+            expected = FlexibleCheckpointWeightLoader('/unused').load(refs)
+            for k in expected:
+                np.testing.assert_array_equal(loaded[k], expected[k])
+                self.assertEqual(loaded[k].dtype, expected[k].dtype)
+            # Hash mismatch before model construction; original file is unchanged.
+            wrong = {**base, 'llm': np.zeros(2, ml_dtypes.bfloat16)}
+            with patch('openpi.models.model.restore_params', return_value=wrong):
+                with self.assertRaisesRegex(ValueError, 'frozen base'):
+                    cfg.weight_loader.load(refs)
+            for actor, message in [({'encoder': trained['encoder']}, 'Missing'),
+                                   ({**trained, 'extra': np.ones(1)}, 'extra'),
+                                   ({**trained, 'encoder': np.ones(3)}, 'shape')]:
+                with self.subTest(message=message):
+                    self.compact(config, actor=actor)
+                    with self.assertRaisesRegex(ValueError, message):
+                        cfg.weight_loader.load(refs)
+            # Config/norm text changing after build_online is rejected.
+            self.compact(config)
+            meta = ck.read_metadata(path)
+            meta['files']['assets/test/data/norm_stats.json'] += ' '
+            with ck.pack({'actor': trained}, meta) as b, b.open() as src:
+                path.write_bytes(src.read())
+            with self.assertRaisesRegex(ValueError, 'changed after'):
+                cfg.weight_loader.load(refs)
+
+    def test_online_export_after_compact_initialization(self):
+        from expo_ft.eval import checkpoint as ck
+        config, _ = self.fixture()
+        path, base, trained = self.compact(config)
+        config.initial_sft_checkpoint = str(path)
+        record = mc.make_record(config, task_config(), 8)
+        step = self.root/'online/1'; (step/'model_config').mkdir(parents=True)
+        (step/'model_config/config.json').write_text(json.dumps(record))
+        params = dict(actor_params={**base, **trained}, batch_encoder_params={}, edit_actor_params={})
+        state = dict(actor_train_state={'params': {}}, target_critic={'params': {}})
+        with patch.object(ck, 'restore_tree', side_effect=[params, state]), \
+                ck.export(step, 'online', checkpoint_path='online/test/checkpoints/1', training_run_id='test') as b:
+            meta = ck.manifest(b)['metadata']
+            self.assertEqual(meta['kind'], 'online')
+            self.assertEqual(meta['files']['assets/config.json'], mc.sft_files(path)['assets/config.json'])
+
     def test_preset_drift_and_unrecorded_override_rejected(self):
         config, record = self.fixture()
         cfg = recipe.restore(record)
