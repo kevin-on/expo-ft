@@ -7,11 +7,15 @@ processes use JSON lens settings and depth NONE; --resolution and --fps change
 capture settings only in the benchmark process. --selected-eyes reads only the
 selected lens instead of both eyes for right-lens cameras. Use --serials to
 select cameras explicitly, or --camera-count for a prefix of the configured
-side/wrist pairs. Each robot retains its own worker process. --dry-run prints
+side/wrist pairs. By default each robot retains its own worker process.
+--all-parallel puts all selected cameras in one read pool; --independent-cameras
+gives each camera its own process/read loop. --dry-run prints
 the plan without importing the SDK or accessing any devices.
 Instrumentation is local to these child processes.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 import json
 import multiprocessing as mp
@@ -89,45 +93,56 @@ def instrument(camera, expected_shape):
     return row
 
 
-def select_eye(camera, eye):
-    """Benchmark-only reader: same SDK/copy/color path, one configured lens."""
-    import pyzed.sl as sl
-    view = sl.VIEW.LEFT if eye == 'left' else sl.VIEW.RIGHT
-    mat = camera._left_img if eye == 'left' else camera._right_img
+@contextmanager
+def camera_group(config_paths, serials, args, wrapper_type):
+    """Normal per-camera wrappers, with one read pool for the requested group.
 
-    def read():
-        if camera._cam.grab(camera._runtime) != sl.ERROR_CODE.SUCCESS:
-            return None
-        timestamp = camera._cam.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_milliseconds()
-        status = camera._cam.retrieve_image(mat, view, resolution=camera.zed_resolution)
-        if status != sl.ERROR_CODE.SUCCESS:
-            raise RuntimeError(f'retrieve_image failed: {status}')
-        image = camera._process_frame(mat)
-        return {'image': {camera.serial_number+'_'+eye: image}}, {
-            camera.serial_number+'_frame_received': timestamp}
-
-    camera.read_camera = read
+    Each wrapper receives its owner's settings and selected eye. Shutdown joins
+    every read before closing cameras, including when one read fails.
+    """
+    paths = config_paths if isinstance(config_paths, list) else [config_paths]
+    with ExitStack() as resources:
+        wrappers, cameras = [], {}
+        for path in paths:
+            config = json.loads(Path(path).read_text())
+            eyes = dict(config[key].rsplit('_', 1) for key in ('side_camera_id', 'wrist_camera_id'))
+            for role in ('hand_camera', 'varied_camera', 'static_camera'):
+                settings = config.setdefault('camera_kwargs', {}).setdefault(role, {})
+                settings.update(capture_resolution=args.resolution, camera_fps=args.fps)
+            for serial in serials:
+                if serial not in eyes:
+                    continue
+                if serial in cameras:
+                    raise ValueError('Duplicate camera: '+serial)
+                views = {serial: [eyes[serial]]} if args.selected_eyes else None
+                wrapper = wrapper_type(config['camera_kwargs'], [serial],
+                                       config['wrist_camera_serial'], camera_views=views)
+                resources.callback(wrapper.disable_cameras)
+                wrappers.append(wrapper)
+                cameras.update(wrapper.camera_dict)
+        if set(cameras) != set(serials):
+            raise RuntimeError('Opened cameras differ from requested serials')
+        if len(wrappers) == 1:
+            read = wrappers[0].read_cameras
+        else:
+            pool = resources.enter_context(ThreadPoolExecutor(max_workers=len(wrappers)))
+            def read():
+                return list(pool.map(lambda wrapper: wrapper.read_cameras(), wrappers))
+        yield cameras, read
 
 
 def worker(index, config_path, serials, args, barrier, messages):
-    wrapper = None
+    resources = ExitStack()
     output = Path(args.output)
     try:
         import cv2
         import pyzed.sl as sl
-        from droid.camera_utils.camera_readers import zed_camera
         from droid.camera_utils.wrappers.multi_camera_wrapper import MultiCameraWrapper
         width, height = (1280, 720) if args.resolution == '720p' else (1920, 1080)
-        config = json.loads(Path(config_path).read_text())
-        for role in ('hand_camera', 'varied_camera', 'static_camera'):
-            settings = config.setdefault('camera_kwargs', {}).setdefault(role, {})
-            settings.update(capture_resolution=args.resolution, camera_fps=args.fps)
-        wrapper = MultiCameraWrapper(config.get('camera_kwargs', {}), serials,
-                                     config['wrist_camera_serial'])
-        if set(wrapper.camera_dict) != set(serials):
-            raise RuntimeError('Opened cameras differ from requested serials')
+        cameras, read_cameras = resources.enter_context(
+            camera_group(config_path, serials, args, MultiCameraWrapper))
         modes = []
-        for camera in wrapper.camera_dict.values():
+        for camera in cameras.values():
             cfg = camera._cam.get_camera_information().camera_configuration
             depth = camera._cam.get_init_parameters().depth_mode
             modes.append(dict(serial=camera.serial_number, width=cfg.resolution.width,
@@ -135,13 +150,8 @@ def worker(index, config_path, serials, args, barrier, messages):
                               depth=str(depth), left_only=camera.left_only))
             assert (cfg.resolution.width, cfg.resolution.height, cfg.fps) == (width, height, args.fps)
             assert depth == sl.DEPTH_MODE.NONE
-            if args.selected_eyes:
-                camera_id = next(config[key] for key in ('side_camera_id', 'wrist_camera_id')
-                                 if config[key].rsplit('_', 1)[0] == camera.serial_number)
-                eye = camera_id.rsplit('_', 1)[1]
-                select_eye(camera, eye)
-                modes[-1]['selected_eye'] = eye
-        rows = {serial: instrument(cam, (height, width, 3)) for serial, cam in wrapper.camera_dict.items()}
+            modes[-1]['views'] = list(camera.views)
+        rows = {serial: instrument(cam, (height, width, 3)) for serial, cam in cameras.items()}
         messages.put(dict(event='ready', robot=index, modes=modes, opencv_threads=cv2.getNumThreads()))
         summaries = []
         with (output/f'robot{index}-samples.jsonl').open('w') as stream:
@@ -149,7 +159,7 @@ def worker(index, config_path, serials, args, barrier, messages):
                 barrier.wait(timeout=120)
                 warm_end = time.perf_counter()+args.warmup
                 while time.perf_counter() < warm_end:
-                    wrapper.read_cameras()
+                    read_cameras()
                     if requested_hz:
                         time.sleep(1/requested_hz)
                 barrier.wait(timeout=120)
@@ -158,7 +168,7 @@ def worker(index, config_path, serials, args, barrier, messages):
                 samples = []
                 while time.perf_counter()-start < args.duration:
                     began = time.perf_counter()
-                    obs, _ = wrapper.read_cameras()
+                    obs = read_cameras()
                     ended = time.perf_counter()
                     sample = dict(request_hz=requested_hz, wall=time.time(),
                                   pair_ms=(ended-began)*1000,
@@ -193,11 +203,10 @@ def worker(index, config_path, serials, args, barrier, messages):
         barrier.abort()
         raise
     finally:
-        if wrapper is not None:
-            wrapper.disable_cameras()
+        resources.close()
 
 
-def camera_plan(config_paths, serials=None, count=None):
+def camera_plan(config_paths, serials=None, count=None, *, scheduling="per-robot"):
     """Resolve selection from files only, preserving per-robot worker grouping."""
     entries = []
     known = []
@@ -228,6 +237,12 @@ def camera_plan(config_paths, serials=None, count=None):
         entry['cameras'] = [c for c in entry['cameras'] if c['serial'] in serials]
         if entry['cameras']:
             plans.append(entry)
+    if scheduling == 'independent':
+        return [dict(robot=cam['serial'], config=entry['config'], cameras=[cam])
+                for entry in plans for cam in entry['cameras']]
+    if scheduling == 'all-parallel':
+        return [dict(robot='all', config=[entry['config'] for entry in plans],
+                     cameras=[cam for entry in plans for cam in entry['cameras']])]
     return plans
 
 
@@ -247,16 +262,22 @@ def main():
     p.add_argument('--dry-run', action='store_true', help='Print selection/settings without accessing cameras')
     p.add_argument('--selected-eyes', action='store_true',
                    help='Read only each configured side/wrist lens, including right-only')
+    scheduling = p.add_mutually_exclusive_group()
+    scheduling.add_argument('--all-parallel', dest='scheduling', action='store_const', const='all-parallel',
+                            help='One process/pool; wait for all selected cameras per read')
+    scheduling.add_argument('--independent-cameras', dest='scheduling', action='store_const', const='independent',
+                            help='One process/read loop per camera; synchronize phase starts only')
+    p.set_defaults(scheduling='per-robot')
     args = p.parse_args()
     if args.duration < 2 or args.warmup < 0 or any(x < 0 for x in args.request_hz):
         p.error('Invalid duration/warmup/request-hz')
     try:
-        plans = camera_plan(args.configs, args.serials, args.camera_count)
+        plans = camera_plan(args.configs, args.serials, args.camera_count, scheduling=args.scheduling)
     except (ValueError, KeyError, OSError) as exc:
         p.error(str(exc))
     if args.dry_run:
         print(json.dumps(dict(resolution=args.resolution, fps=args.fps,
-                              selected_eyes=args.selected_eyes, request_hz=args.request_hz,
+                              selected_eyes=args.selected_eyes, request_hz=args.request_hz, scheduling=args.scheduling,
                               workers=plans), indent=2))
         return
     if args.output is None:

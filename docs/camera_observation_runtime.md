@@ -165,3 +165,15 @@ Read-only selection preview (does not enumerate or open cameras):
 client/.venv/bin/python scripts/multi_robot/benchmark_camera_latency.py \
   --dry-run --resolution 720p --fps 30 --camera-count 4 --selected-eyes
 ```
+
+`benchmark_camera_latency.py` keeps three raw-read scheduling modes: default
+per-robot processes (side/wrist read concurrently), `--all-parallel` (one process
+and read pool for all selected cameras), and `--independent-cameras` (one process
+per camera; only phase starts synchronize). These last two flags are mutually
+exclusive. All modes construct normal per-camera DROID wrappers, pass native
+`camera_views` for `--selected-eyes`, and join reads before closing cameras.
+Resolution/FPS overrides are in memory only. No buffer, crop or mirror is enabled;
+this measures raw capture/retrieval, not buffered rollout observation latency.
+`tests/test_camera_benchmark.py` checks grouping, settings and failure cleanup
+without an SDK or devices. Existing `pair_ms` fields mean the entire worker's
+read group (one, two or four cameras, depending on the selected mode).
