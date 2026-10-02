@@ -33,10 +33,10 @@ class FrameTests(unittest.TestCase):
             def step(a):
                 calls.append(a.copy());a=a.copy();a[0]=0 # Physical workspace clipping.
                 return {'executed_action':a}
-            env=SimpleNamespace(_model_frame=frame,step=step,close=lambda:None)
+            env=SimpleNamespace(_model_frame=frame,step=step,close=lambda:None,last_action_send_ms=1200.)
             class WS:
                 remote_address='fake';transport=SimpleNamespace(get_extra_info=lambda _:None)
-                request=msgpack_numpy.packb({'operation':'step','env_id':'r','action':np.ones(7)*.2})
+                request=msgpack_numpy.packb({'operation':'step','env_id':'r','action':np.ones(7)*.2,'observation_metadata':{'frame_received_ms':{'side':1000.,'wrist':1010.}}})
                 async def recv(self):
                     if self.request is None:raise ConnectionClosed(None,None)
                     r,self.request=self.request,None;return r
@@ -49,6 +49,7 @@ class FrameTests(unittest.TestCase):
             clipped=expected.copy();clipped[0]=0
             np.testing.assert_array_equal(ws.reply['action'],frame.action(clipped))
             self.assertEqual(ws.reply['action_type'],'human' if human else 'policy')
+            self.assertEqual(ws.reply['action_timing']['frame_age_ms'],{} if human else {'side':200.,'wrist':190.})
 
     def test_old_server_rejected(self):
         c=EnvClient()

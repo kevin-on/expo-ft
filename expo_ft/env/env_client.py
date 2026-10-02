@@ -41,6 +41,8 @@ class EnvClient:
         # consumed by get_info_for_step() so it needs no separate round-trip.
         self._last_info = None
         self.observation_timing = {}
+        self.observation_metadata = {}
+        self.action_timing = {}
         # The accept server runs in a background thread and hands each incoming
         # connection to the calling loop via this condition/slot.
         self._server = None
@@ -160,6 +162,10 @@ class EnvClient:
                 self.network_ms += (received_at - recv_start) * 1000.0
                 response = msgpack_numpy.unpackb(raw)
                 decoded_at = time.perf_counter()
+                if 'observation' in response:
+                    self.observation_metadata = response.get('observation_metadata', {})
+                if operation == 'step':
+                    self.action_timing = response.get('action_timing', {})
                 if operation == "get_observation":
                     timing = dict(
                         rpc_ms=(decoded_at - rpc_start) * 1000,
@@ -232,9 +238,9 @@ class EnvClient:
         response = self._call_operation("start_episode", {"env_id": env_id})
         return response["observation"]
 
-    def step(self, env_id: str, action: np.ndarray) -> Tuple[np.ndarray, str]:
+    def step(self, env_id: str, action: np.ndarray, observation_metadata=None) -> Tuple[np.ndarray, str]:
         """Step the environment. Returns (real_executed_action, action_type)."""
-        response = self._call_operation("step", {"env_id": env_id, "action": action})
+        response = self._call_operation("step", {"env_id": env_id, "action": action, "observation_metadata": observation_metadata})
         real_action = np.array(response.get("action", action))
         action_type = response.get("action_type", "policy")
         return real_action, action_type
@@ -341,7 +347,7 @@ class EnvClientWrapper:
 
     def step(self, action):
         """Step the environment. Returns (real_executed_action, action_type)."""
-        return self._call("step", lambda: self.client.step(self.env_id, action))
+        return self._call("step", lambda: self.client.step(self.env_id, action, getattr(self, '_action_observation', None)))
 
     def get_observation(self):
         """Get the observation of the environment."""
@@ -350,6 +356,16 @@ class EnvClientWrapper:
     def get_info_for_step(self):
         """Evaluate termination after a step: (done, success, reward, continuation_mask)."""
         return self._call("get_info_for_step", lambda: self.client.get_info_for_step(self.env_id))
+
+    def get_observation_metadata(self):
+        return dict(self.client.observation_metadata)
+
+    def set_action_observation(self, metadata):
+        # Explicit plan metadata; subsequent observations must not replace this.
+        self._action_observation = metadata
+
+    def get_action_timing(self):
+        return dict(self.client.action_timing)
 
     def get_observation_timing(self):
         """Diagnostics for the last observation RPC, never model input."""

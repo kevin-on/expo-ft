@@ -296,9 +296,16 @@ class DroidEnv(RobotEnv):
         # SDK timestamps measure grab only, not retrieve/resize. Cameras run in
         # parallel: these are diagnostics, not additive parts of cameras_ms.
         timestamps = raw_obs.get("timestamp", {}).get("cameras", {})
+        selected_ms = timestamps.get('buffer_selected_ms', time.time_ns()/1e6)
+        self.observation_metadata = dict(frame_received_ms={}, selected_ms=selected_ms,
+                                         buffer_sequence=timestamps.get('buffer_sequence'))
         for view, camera_id in (("side", self.side_camera_id), ("wrist", self.wrist_camera_id)):
             if camera_id:
                 serial = camera_id.rsplit("_", 1)[0]
+                received = timestamps.get(serial + '_frame_received')
+                if received is not None:
+                    self.observation_metadata['frame_received_ms'][view] = received
+                    self.observation_timing[view + '_frame_age_ms'] = selected_ms - received
                 begin, end = timestamps.get(serial + "_read_start"), timestamps.get(serial + "_read_end")
                 if begin is not None and end is not None:
                     self.observation_timing[view + "_grab_ms"] = float(end - begin)
@@ -329,6 +336,8 @@ class DroidEnv(RobotEnv):
                     action[axis] = 0.0
         executed_action = np.array(action, dtype=np.float64)
 
+        # Immediately before the DROID update RPC, after physical workspace clipping.
+        self.last_action_send_ms = time.time_ns()/1e6
         action_info = super().step(action)
         a = np.asarray(action).reshape(-1)
         self._last_gripper_velocity = float(action_info.get("gripper_velocity", a[-1] if len(a) > 0 else 0.0))

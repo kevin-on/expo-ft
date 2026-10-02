@@ -52,3 +52,26 @@ Missing, stale, future-dated or failed frames surface an error rather than silen
 running on old pixels. SDK timestamps are host-reception time, not sensor exposure
 start. Hardware mode changes/recording stop the producer before touching the SDK.
 SVO recording reads synchronously. Collection also disables this cache explicitly.
+
+## Frame-to-action timing
+
+Observation RPCs carry `observation_metadata` alongside (never inside) model
+inputs: side/wrist `frame_received_ms`, `selected_ms`, and `buffer_sequence`.
+These are SDK IMAGE timestamps in WS Unix milliseconds, not ILIAD timestamps or
+estimated exposure times. Online rounds and coordinated eval retain the metadata
+of the observation used to create each action chunk, even while newer observations
+arrive. Every action from that chunk echoes the same metadata to WS.
+
+WS samples `last_action_send_ms` after physical clipping, just before the DROID
+update RPC. The difference is host frame reception → WS robot-command dispatch;
+USB capture latency and NUC/controller application latency are not included.
+`[timing][frame action]` logs contain separate side/wrist ages and action source.
+Eval episode step timings also contain `action_frame_timing`. Human actions and
+zero handoff polls have no policy-frame age (they are not model decisions).
+Observation timing includes side/wrist age at buffer selection. Missing timestamps
+stay missing rather than being substituted with a recent unrelated frame.
+
+Legacy single-robot asynchronous/RTC entrypoints still use the common WS coordinate
+boundary, but do not claim chunk provenance timing until their asynchronous plans
+explicitly carry this metadata; the split/colocated round and coordinated eval
+paths implement it.

@@ -124,6 +124,7 @@ class RobotEvaluation:
             self.check()
             observation = env.start_episode()  # Fresh after Space, not a frame from reset.
             observed = time.monotonic()
+            plan_metadata = getattr(env, "get_observation_metadata", lambda: None)()
             plan, plan_ms = self.plan(robot, observation)
             policy_observed = observed
             self.state(robot, status='first action ready')
@@ -135,12 +136,16 @@ class RobotEvaluation:
             for step in range(1, self.max_steps+1):
                 self.check()
                 if not plan:
+                    plan_metadata = getattr(env, "get_observation_metadata", lambda: None)()
                     plan, plan_ms = self.plan(robot, observation)
                     policy_observed = observed
                 if previous is not None:
                     self.stop.wait(max(0., self.period-(time.monotonic()-previous)))
                 self.check()
                 dispatched = time.monotonic()
+                set_metadata = getattr(env, 'set_action_observation', None)
+                if set_metadata is not None:
+                    set_metadata(plan_metadata)
                 _, source = env.step(plan.popleft())
                 acted = time.monotonic()
                 human_steps += source == 'human'
@@ -153,6 +158,7 @@ class RobotEvaluation:
                     observation_ms=(arrived-acted)*1000,
                     observation_age_ms=(dispatched-observed)*1000,
                     policy_observation_age_ms=(dispatched-policy_observed)*1000))
+                timings[-1]['action_frame_timing'] = getattr(env, 'get_action_timing', lambda: {})()
                 get_timing = getattr(env, 'get_observation_timing', None)
                 if get_timing is not None:
                     timings[-1]['observation_breakdown'] = get_timing()

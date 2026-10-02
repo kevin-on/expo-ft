@@ -21,6 +21,7 @@ from typing import Dict, Any, Optional
 
 import numpy as np
 from expo_ft.env.model_frame import ModelFrame
+from client.real_utils.frame_timing import action_frame_timing
 import websockets
 import websockets.asyncio.client as _client
 from websockets.protocol import State
@@ -320,6 +321,7 @@ async def _handle_environment_request(websocket):
                         response = {
                             "status": "success",
                             "observation": _model_observation(env, obs),
+                            "observation_metadata": getattr(env, "observation_metadata", {}),
                             "done": False,
                         }
                     await websocket.send(packer.pack(response))
@@ -339,7 +341,8 @@ async def _handle_environment_request(websocket):
                     else:
                         # Fresh initial frame; no success detector or terminal handling
                         # before the first action. get_observation records this frame.
-                        response = {"status": "success", "observation": _model_observation(env, env.get_observation())}
+                        response = {"status": "success", "observation": _model_observation(env, env.get_observation()),
+                                    "observation_metadata": getattr(env, "observation_metadata", {})}
                     await websocket.send(packer.pack(response))
 
                 elif operation == "step":
@@ -373,7 +376,9 @@ async def _handle_environment_request(websocket):
                         sent_is_invalid = np.allclose(sent_action, -1.0)
                         if is_human or not sent_is_invalid:
                             t_env_step0 = time.perf_counter()
+                            fallback_send_ms = time.time_ns()/1e6
                             step_result = env.step(real_action)
+                            sent_ms = getattr(env, 'last_action_send_ms', fallback_send_ms)
                             env_step_ms = (time.perf_counter() - t_env_step0) * 1000.0
                             executed_action = np.array(
                                 step_result["executed_action"],
@@ -382,8 +387,12 @@ async def _handle_environment_request(websocket):
                         else:
                             env_step_ms = 0.0
                             executed_action = real_action
+                            sent_ms = None
 
+                        frame_timing = action_frame_timing(request.get('observation_metadata'), sent_ms, action_type)
+                        logger.info('[timing][frame action] env_id=%s %s', env_id, json.dumps(frame_timing))
                         response = {
+                            "action_timing": frame_timing,
                             "status": "success",
                             "action": frame.action(executed_action).tolist(),
                             "action_type": action_type,
@@ -422,6 +431,7 @@ async def _handle_environment_request(websocket):
                         response = {
                             "status": "success",
                             "observation": _model_observation(env, obs),
+                            "observation_metadata": getattr(env, "observation_metadata", {}),
                             "done": bool(done),
                             "success": bool(success),
                             "reward": float(reward),

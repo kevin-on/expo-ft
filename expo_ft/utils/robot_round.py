@@ -51,11 +51,13 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
         if canonical:
             observation = model_inputs(observation)
         plan = deque()
+        plan_metadata = None
         transitions = []
         action_type = "policy"
         last_dispatch = None
         while not stopped.is_set():
             if not plan and action_type != "human":
+                plan_metadata = getattr(env, 'get_observation_metadata', lambda: None)()
                 response = Future()
                 requests.put((deepcopy(observation), response))
                 while not response.done():
@@ -75,6 +77,9 @@ def collect_round(envs, sample_actions, replan_steps, control_hz, mirror_robot=N
             has_action = bool(plan)
             command = plan.popleft() if has_action else np.zeros_like(action)
             last_dispatch = time.monotonic()
+            set_metadata = getattr(env, 'set_action_observation', None)
+            if set_metadata is not None:
+                set_metadata(plan_metadata if has_action else None)
             action, action_type = env.step(command)
             if action_type == "human":
                 plan.clear()
