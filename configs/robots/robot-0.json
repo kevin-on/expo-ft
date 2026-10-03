@@ -37,13 +37,13 @@
       "image": true,
       "depth": false,
       "capture_resolution": "720p",
-      "camera_fps": 30
+      "camera_fps": 15
     },
     "varied_camera": {
       "image": true,
       "depth": false,
-      "capture_resolution": "720p",
-      "camera_fps": 30
+      "capture_resolution": "1080p",
+      "camera_fps": 15
     }
   },
   "camera_crops": {

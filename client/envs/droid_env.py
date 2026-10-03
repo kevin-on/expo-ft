@@ -293,8 +293,9 @@ class DroidEnv(RobotEnv):
                            ("cameras_ms", self._cameras_read_ms)):
             if value is not None:
                 self.observation_timing[key] = value
-        # SDK timestamps measure grab only, not retrieve/resize. Cameras run in
-        # parallel: these are diagnostics, not additive parts of cameras_ms.
+        # WS wall-clock stamps and SDK IMAGE stamps are epoch milliseconds.
+        # Background read durations are not additive parts of cameras_ms,
+        # which measures the foreground buffer lookup.
         timestamps = raw_obs.get("timestamp", {}).get("cameras", {})
         selected_ms = timestamps.get('buffer_selected_ms', time.time_ns()/1e6)
         self.observation_metadata = dict(frame_received_ms={}, selected_ms=selected_ms,
@@ -309,6 +310,19 @@ class DroidEnv(RobotEnv):
                 begin, end = timestamps.get(serial + "_read_start"), timestamps.get(serial + "_read_end")
                 if begin is not None and end is not None:
                     self.observation_timing[view + "_grab_ms"] = float(end - begin)
+                returned = timestamps.get(serial + "_read_return")
+                # Keep negative start-minus-image values: grab may wait for a
+                # frame whose timestamp is newer than the call's start.
+                for name, finish, start in (
+                    ('image_age_at_read_start_ms', begin, received),
+                    ('image_age_at_grab_end_ms', end, received),
+                    ('image_age_at_read_return_ms', returned, received),
+                    ('retrieve_process_ms', returned, end),
+                    ('read_total_ms', returned, begin),
+                    ('read_return_to_selected_ms', selected_ms, returned),
+                ):
+                    if finish is not None and start is not None:
+                        self.observation_timing[view + '_' + name] = float(finish - start)
         return observation
 
     def reached_boundary(self, raw_obs):

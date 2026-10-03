@@ -25,6 +25,9 @@ import numpy as np
 
 STALE_AFTER = 0.75
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+
+from client.envs.camera_config import crop_for
 
 
 @dataclass(frozen=True)
@@ -43,10 +46,11 @@ class CameraView:
 class ZedReader:
     """One camera-owning worker; publishes complete stereo pairs from one grab."""
 
-    def __init__(self, sdk, serial, fps):
+    def __init__(self, sdk, serial, fps, resolution="1080p"):
         self.sdk = sdk
         self.serial = serial
         self.fps = fps
+        self.resolution = resolution
         self.stop = threading.Event()
         self._lock = threading.Lock()
         self._view = CameraView()
@@ -67,7 +71,7 @@ class ZedReader:
         try:
             params = sl.InitParameters()
             params.set_from_serial_number(self.serial)
-            params.camera_resolution = sl.RESOLUTION.HD1080
+            params.camera_resolution = getattr(sl.RESOLUTION, CAPTURE_MODES[self.resolution][0])
             params.camera_fps = self.fps
             params.depth_mode = sl.DEPTH_MODE.NONE
             params.camera_image_flip = sl.FLIP_MODE.OFF
@@ -139,17 +143,36 @@ class CameraPair:
     name: str
     serials: tuple[int, int]
     eyes: tuple[str, str]
+    resolutions: tuple[str, str]
+    fps: tuple[int, int]
+    mirrors: tuple[bool, bool]
+    crops: tuple[dict, dict]
+
+    def crop_boxes(self, eyes):
+        return [crops.get(f'{serial}_{eye}', {}).get(resolution)
+                for serial, eye, resolution, crops in
+                zip(self.serials, eyes, self.resolutions, self.crops)]
 
 
-def preview_frames(views, eyes, mirrors, size, opacity, now):
+CAPTURE_MODES = {
+    '720p': ('HD720', (15, 30, 60)),
+    '1080p': ('HD1080', (15, 30)),
+}
+
+
+def preview_frames(views, eyes, mirrors, size, opacity, now, crop_boxes=None):
     """Return selected/transformed BGR previews and overlay; never mutate captures.
 
     A stale source can be inspected dimmed, but cannot contribute to an overlay.
     """
     live = [view.is_live(now) for view in views]
     frames = []
-    for view, eye, mirror, healthy in zip(views, eyes, mirrors, live):
+    if crop_boxes is None:
+        crop_boxes = [None] * len(views)
+    for view, eye, mirror, healthy, box in zip(views, eyes, mirrors, live, crop_boxes):
         source = getattr(view, eye)
+        if source is not None and box is not None:
+            source, _ = crop_for('preview', source, {'preview': {'capture': box}}, 'capture')
         frame = (cv2.resize(source, size, interpolation=cv2.INTER_AREA) if source is not None
                  else np.zeros((size[1], size[0], 3), dtype=np.uint8))
         if mirror:
@@ -288,7 +311,7 @@ class AlignmentWindow:
         self.window.protocol('WM_DELETE_WINDOW', close)
         self.window.bind('<Escape>', lambda _: close())
         self.eyes = [tk.StringVar(value=eye) for eye in pair.eyes]
-        self.mirrors = [tk.BooleanVar(value=value) for value in args.mirrors]
+        self.mirrors = [tk.BooleanVar(value=value) for value in pair.mirrors]
         self.guide = tk.StringVar(value='Grid')
         self.footer = tk.StringVar()
         self.status = [tk.StringVar() for _ in range(5 if dataset else 3)]
@@ -324,7 +347,7 @@ class AlignmentWindow:
             controls.pack(fill='x')
             controls.pack_propagate(False)
             if i < 2:
-                ttk.Label(controls, text=f'ZED {pair.serials[i]}').pack(anchor='w')
+                ttk.Label(controls, text=f'ZED {pair.serials[i]} · {pair.resolutions[i]} {pair.fps[i]}fps').pack(anchor='w')
                 lenses = ttk.Frame(controls)
                 lenses.pack(anchor='w', pady=5)
                 for eye in ('left', 'right'):
@@ -368,6 +391,7 @@ class AlignmentWindow:
                 self.load_reference(robot, initial=True)
             ttk.Label(settings, text='Frame numbers start at 0. Select episode/frame, then Load.\n'
                       'Dataset and live share the lens + mirror controls above.\n'
+                      'Config crop applies to live frames only; recorded references stay unchanged.\n'
                       'Wrist comparison needs the same robot pose.',
                       wraplength=args.width // 3 - 55).pack(anchor='w', pady=5)
         ttk.Label(body, textvariable=self.footer).pack(anchor='w', pady=(6, 0))
@@ -398,10 +422,12 @@ class AlignmentWindow:
         size = (width, max(1, round(width * 9 / 16)))
         eyes = [v.get() for v in self.eyes]
         mirrors = [v.get() for v in self.mirrors]
-        frames, live = preview_frames(views, eyes, mirrors, size, self.blends[0].value.get()/100, now)
+        boxes = self.pair.crop_boxes(eyes)
+        frames, live = preview_frames(views, eyes, mirrors, size, self.blends[0].value.get()/100, now, boxes)
         healthy = [*live, all(live)]
         for robot, (view, ok) in enumerate(zip(views, live)):
             label = eyes[robot].upper() + (' · mirrored' if mirrors[robot] else ' · original')
+            label += f' · crop {boxes[robot]}' if boxes[robot] is not None else ' · no crop'
             self.status[robot].set(f'LIVE · {1000*(now-view.updated_at):.0f} ms old · {label}' if ok else
                                    f'{"ERROR" if view.fatal else "WAITING / STALE"} · {view.issue or "No recent frame"}')
         self.status[2].set('LIVE · mirror alignment' if all(live) else 'Paused: needs two live cameras')
@@ -411,7 +437,8 @@ class AlignmentWindow:
                     # Same physical lens and reflection on BOTH inputs: robot1 is not double-flipped.
                     comparison, valid = preview_frames([ref.snapshot(), views[robot]], [eyes[robot]]*2,
                                                        [mirrors[robot]]*2, size,
-                                                       self.blends[robot+1].value.get()/100, time.monotonic())
+                                                       self.blends[robot+1].value.get()/100, time.monotonic(),
+                                                       [None, boxes[robot]])
                     frames.append(comparison[2])
                     healthy.append(all(valid))
                     self.status[robot+3].set(f'Episode {ref.path.parent.name} · frame {ref.index} · {eyes[robot].upper()}'
@@ -430,7 +457,7 @@ class AlignmentWindow:
             canvas.itemconfigure(self.items[i], image=photo)
             canvas.coords(self.items[i], canvas.winfo_width()/2, canvas.winfo_height()/2)
         skew = abs(views[0].updated_at - views[1].updated_at)*1000
-        self.footer.set((f'HD1080 · Pair age difference: {skew:.0f} ms · ' if all(live) else '')
+        self.footer.set((f'Pair age difference: {skew:.0f} ms · ' if all(live) else '')
                         + 'Preview only; dataset/configs unchanged. Esc or closing either window exits.')
 
 
@@ -449,9 +476,10 @@ def parse_args(argv=None):
     only.add_argument("--side-only", action="store_true")
     only.add_argument("--wrist-only", action="store_true")
     parser.add_argument("--flip", choices=("none", "robot0", "robot1", "both", "side1", "side2"),
-                        default="robot1", help="Initial mirror selection; each window's checkboxes are independent")
+                        default=None, help="Override config mirror defaults; UI checkboxes remain adjustable")
     parser.add_argument("--opacity", type=float, default=0.5, help="Robot1 blend weight, 0..1")
-    parser.add_argument("--fps", type=int, choices=(15, 30), default=15, help="HD1080 capture FPS")
+    parser.add_argument("--fps", type=int, choices=(15, 30, 60), default=None,
+                        help="Override all camera FPS; default: each robot's camera_kwargs")
     parser.add_argument("--width", type=int, default=1440, help="Initial width of each window (>=960)")
     args = parser.parse_args(argv)
     if args.check_reference and args.dataset_root is None:
@@ -465,7 +493,7 @@ def parse_args(argv=None):
     try:
         configs = [json.loads(getattr(args, f"robot{i}_config").read_text()) for i in (0, 1)]
         for name in names:
-            serials, eyes = [], []
+            serials, eyes, resolutions, rates, mirrors, crops = [], [], [], [], [], []
             for i, config in enumerate(configs):
                 serial, eye = config[f"{name}_camera_id"].rsplit("_", 1)
                 if eye not in ("left", "right"):
@@ -473,13 +501,26 @@ def parse_args(argv=None):
                 override = getattr(args, f"{name}{i+1}")
                 serials.append(int(serial) if override is None else override)
                 eyes.append(eye)
-            args.pairs.append(CameraPair(name.title(), tuple(serials), tuple(eyes)))
+                settings = config.get('camera_kwargs', {}).get('hand_camera' if name == 'wrist' else 'varied_camera', {})
+                resolution = settings.get('capture_resolution', '1080p')
+                rate = args.fps if args.fps is not None else settings.get('camera_fps', 15)
+                if resolution not in CAPTURE_MODES or rate not in CAPTURE_MODES[resolution][1]:
+                    raise ValueError(f'Unsupported capture mode: robot{i} {name} {resolution} {rate}fps')
+                resolutions.append(resolution)
+                rates.append(rate)
+                mirror = config['model_frame']['mirror_images'][name]
+                if type(mirror) is not bool:
+                    raise ValueError(f'robot{i} model_frame.mirror_images.{name} must be boolean')
+                mirrors.append(mirror if args.flip is None else
+                               args.flip in (('robot0', 'side1', 'both') if i == 0 else ('robot1', 'side2', 'both')))
+                crops.append(config.get('camera_crops', {}))
+            args.pairs.append(CameraPair(name.title(), tuple(serials), tuple(eyes), tuple(resolutions),
+                                         tuple(rates), tuple(mirrors), tuple(crops)))
     except (OSError, ValueError, KeyError, AttributeError, TypeError) as exc:
         parser.error(f"Invalid robot camera configuration: {exc}")
     serials = [s for pair in args.pairs for s in pair.serials]
     if any(s <= 0 for s in serials) or len(set(serials)) != len(serials):
         parser.error("All enabled camera serial numbers must be positive and distinct")
-    args.mirrors = (args.flip in ("robot0", "side1", "both"), args.flip in ("robot1", "side2", "both"))
     return args
 
 
@@ -500,8 +541,8 @@ def run(args, sdk, dataset=None):
         windows = []
         for pair in args.pairs:
             pair_readers = []
-            for serial in pair.serials:
-                readers[serial] = ZedReader(sdk, serial, args.fps)
+            for serial, fps, resolution in zip(pair.serials, pair.fps, pair.resolutions):
+                readers[serial] = ZedReader(sdk, serial, fps, resolution)
                 pair_readers.append(readers[serial])
             windows.append(AlignmentWindow(root, pair, pair_readers, args, root.quit, dataset=dataset))
             print(f"{pair.name}: robot0 {pair.serials[0]}_{pair.eyes[0]}, robot1 {pair.serials[1]}_{pair.eyes[1]}")

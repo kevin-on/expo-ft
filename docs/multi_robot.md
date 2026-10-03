@@ -185,11 +185,18 @@ windows, each with robot0, robot1, and their overlay:
 client/.venv/bin/python scripts/align_cameras.py
 ```
 
-Run on the workstation graphical desktop. The Tk/Pillow UI reads camera serials
-and initial LEFT/RIGHT lenses from `configs/robots/robot-{0,1}.json`. Select one
-lens per robot with the radio buttons; each camera has its own horizontal mirror
-checkbox (robot1 mirrored by default). These controls affect previews only and
-never write robot configs. Side and wrist controls are independent.
+Run on the workstation graphical desktop. The Tk/Pillow UI reads camera serials,
+initial LEFT/RIGHT lenses, per-role `camera_kwargs` resolution/FPS,
+`camera_crops`, and initial `model_frame.mirror_images` from
+`configs/robots/robot-{0,1}.json`. Live frames are cropped for the selected
+serial/lens and capture resolution before preview resizing and mirroring.
+Select either lens with the radio buttons; its matching crop is used, or no crop
+if none is configured. Each camera's horizontal mirror checkbox remains freely
+adjustable; the JSON only sets its initial value. Controls never write configs.
+Side and wrist controls are independent. `--fps` and `--flip` explicitly override
+the config defaults. The camera labels show capture settings and the active crop.
+Recorded dataset references are not cropped again with the live capture crop;
+they retain their recorded field of view and share the selected lens/mirror.
 
 Opacity is robot1's percentage: 0 shows robot0, 100 shows robot1. Click or drag
 the slider, type a percentage and press Enter, use the +/- buttons or slider

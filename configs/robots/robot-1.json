@@ -9,7 +9,7 @@
   "wrist_camera_serial": "12841040",
   "side_camera_id": "29838012_left",
   "wrist_camera_id": "12841040_right",
-  "spacemouse_device_path": "/dev/hidraw3",
+  "spacemouse_device_path": "/dev/hidraw6",
   "bounds": [
     [
       0.355,
@@ -38,13 +38,13 @@
       "image": true,
       "depth": false,
       "capture_resolution": "720p",
-      "camera_fps": 30
+      "camera_fps": 15
     },
     "varied_camera": {
       "image": true,
       "depth": false,
-      "capture_resolution": "720p",
-      "camera_fps": 30
+      "capture_resolution": "1080p",
+      "camera_fps": 15
     }
   },
   "camera_crops": {
