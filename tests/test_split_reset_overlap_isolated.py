@@ -58,7 +58,7 @@ class SplitOverlapTests(unittest.TestCase):
         env.get_observation = lambda: calls.append('camera') or {'frame': 1}
         self.assertIsNone(env.reset(return_observation=False))
         self.assertEqual(calls, ['before', 'motion', 'joints'])
-        self.assertEqual(env._raw_frame_buffer, [])
+        self.assertEqual(env._video_frames, {"side": [], "wrist": [], "record": []})
         self.assertEqual(env._steps_since_reset, 0)
         self.assertEqual(env.reset(), {'frame': 1})
         self.assertEqual(calls[-3:], ['before', 'motion', 'camera'])

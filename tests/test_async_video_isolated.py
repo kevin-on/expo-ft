@@ -32,8 +32,7 @@ def terminal_env(writer):
     env.detect = lambda obs: (False, False)
     env.video_dir = "unused"
     env.video_encoder_threads = 2
-    env._raw_frame_buffer = [object()]
-    env._record_frame_buffer = [object()]
+    env._video_frames = {view: [object()] for view in ("side", "wrist", "record")}
     env._ep_count = 3
     env._video_writer = writer
     return env, saves
@@ -68,7 +67,7 @@ class AsyncVideoTests(unittest.TestCase):
 
         writer = EpisodeVideoWriter(save)
         env, _ = terminal_env(writer)
-        raw, record = env._raw_frame_buffer, env._record_frame_buffer
+        side, wrist, record = env._video_frames.values()
 
         def terminal():
             try:
@@ -87,25 +86,25 @@ class AsyncVideoTests(unittest.TestCase):
             self.assertEqual(failures, [])
             self.assertEqual(result, [(True, False, 0.0, 0.0)])
             self.assertEqual(env._ep_count, 4)
-            self.assertEqual(env._raw_frame_buffer, [])
-            self.assertEqual(env._record_frame_buffer, [])
-            env._raw_frame_buffer.append("next episode frame")
+            self.assertEqual(env._video_frames, {"side": [], "wrist": [], "record": []})
+            env._video_frames["side"].append("next episode frame")
             self.assertEqual(saved, [])
         finally:
             release.set()
             thread.join(2)
             writer.close()
-        self.assertIs(saved[0][0], raw)
-        self.assertIs(saved[1][0], record)
-        self.assertEqual([(x[2], x[3]) for x in saved], [(3, "raw"), (3, "record")])
-        self.assertNotIn("next episode frame", raw)
+        self.assertIs(saved[0][0], side)
+        self.assertIs(saved[1][0], wrist)
+        self.assertIs(saved[2][0], record)
+        self.assertEqual([(x[2], x[3]) for x in saved], [(3, "side"), (3, "wrist"), (3, "record")])
+        self.assertNotIn("next episode frame", side)
 
     def test_default_terminal_handler_remains_synchronous(self):
         env, saves = terminal_env(None)
         with redirect_stdout(io.StringIO()):
             env.get_info_for_step()
-        self.assertEqual(len(saves), 2)
-        self.assertEqual([kwargs["prefix"] for _, kwargs in saves], ["raw", "record"])
+        self.assertEqual(len(saves), 3)
+        self.assertEqual([kwargs["prefix"] for _, kwargs in saves], ["side", "wrist", "record"])
 
     def test_backlog_is_bounded_and_close_drains(self):
         started, release, submitted, closing, closed = (threading.Event() for _ in range(5))

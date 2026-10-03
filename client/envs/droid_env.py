@@ -9,7 +9,7 @@ from droid.robot_env import RobotEnv
 from client.envs.utils import process_image_for_obs
 from client.envs.camera_config import selected_views, prepare_images
 from client.envs.zed_recorder import ZedRecorder, release_unused_zeds, release_zed_from_reader
-from client.real_utils.vis_utils import raw_frame_from_raw_obs, save_episode_video as save_episode_video_to_disk
+from client.real_utils.vis_utils import save_episode_video as save_episode_video_to_disk
 from client.real_utils.async_video import EpisodeVideoWriter
 from client.real_utils.detector import PickBlocksDetector
 from client.real_utils.detector import LightPlugDetector
@@ -17,10 +17,9 @@ from client.real_utils.detector import success_detector_manual
 
 
 def _prepare_video_frame(prefix, frame):
-    """Only owned images/IDs, never a live environment or camera reader."""
-    if prefix == "raw":
-        raw_obs, side_id, wrist_id = frame
-        return raw_frame_from_raw_obs(raw_obs, side_id, wrist_id)
+    """Convert one owned camera image without resizing, cropping or joining views."""
+    if prefix in ("side", "wrist"):
+        return process_image_for_obs(frame, bgr_to_rgb=True, image_size=None)
     rec = np.asarray(frame, dtype=np.uint8)
     return cv2.cvtColor(rec, cv2.COLOR_BGRA2RGB if rec.shape[-1] == 4 else cv2.COLOR_BGR2RGB)
 
@@ -108,8 +107,7 @@ class DroidEnv(RobotEnv):
         self.prev_obs = None
         self.control_hz = control_hz
         self.video_dir = video_dir
-        self._raw_frame_buffer = []
-        self._record_frame_buffer = []
+        self._video_frames = {"side": [], "wrist": [], "record": []}
         self._ep_count = 0
         self._video_writer = (
             EpisodeVideoWriter(
@@ -139,8 +137,7 @@ class DroidEnv(RobotEnv):
     def reset(self, *, return_observation=True):
         self._before_reset()
         self._steps_since_reset = 0
-        self._raw_frame_buffer = []
-        self._record_frame_buffer = []
+        self._video_frames = {"side": [], "wrist": [], "record": []}
         super().reset(randomize=self.reset_random)
         if self.camera_buffer.get('enabled', False):
             self.camera_reader.require_fresh(time.time_ns()/1e6)
@@ -186,13 +183,9 @@ class DroidEnv(RobotEnv):
 
         if done:
             print(f"Done! Success: {success}, Time stop: {time_stop}, Manual stop: {manual_stop}, Reached boundary: {reached_boundary}")
-            videos = []
-            if self.video_dir and self._raw_frame_buffer:
-                videos.append(("raw", self._raw_frame_buffer))
-                self._raw_frame_buffer = []
-            if self.video_dir and self._record_frame_buffer:
-                videos.append(("record", self._record_frame_buffer))
-                self._record_frame_buffer = []
+            videos = [(view, frames) for view, frames in self._video_frames.items()
+                      if self.video_dir and frames]
+            self._video_frames = {"side": [], "wrist": [], "record": []}
             if videos:
                 if self._video_writer is not None:
                     # Transfer the old lists, not copies or buffers reused by reset.
@@ -263,23 +256,17 @@ class DroidEnv(RobotEnv):
         raw_obs = self.get_raw_observation()
         raw_finished = time.perf_counter()
         if self.video_dir:
-            if self._video_writer is not None:
-                # ZedCamera._process_frame returns an owned copy, not reusable SDK
-                # storage. Retain only selected views; policy transforms don't
-                # mutate them. Preparation runs in the episode worker after done.
-                images = raw_obs.get("image", {})
-                if self.side_camera_id in images:
-                    selected = {key: images[key] for key in (self.side_camera_id, self.wrist_camera_id)
-                                if key in images}
-                    self._raw_frame_buffer.append(({"image": selected}, self.side_camera_id, self.wrist_camera_id))
-                if self.record_camera and self.record_camera in images:
-                    self._record_frame_buffer.append(images[self.record_camera])
-            else:
-                frame = raw_frame_from_raw_obs(raw_obs, self.side_camera_id, self.wrist_camera_id)
-                if frame is not None:
-                    self._raw_frame_buffer.append(frame)
-                if self.record_camera and self.record_camera in raw_obs.get("image", {}):
-                    self._record_frame_buffer.append(_prepare_video_frame("record", raw_obs["image"][self.record_camera]))
+            # Retain only selected, owned images. The async worker converts each
+            # view independently; policy crop/mirror does not mutate raw images.
+            images = raw_obs.get("image", {})
+            for view, camera_id in (("side", self.side_camera_id),
+                                    ("wrist", self.wrist_camera_id),
+                                    ("record", self.record_camera)):
+                if camera_id and camera_id in images:
+                    frame = images[camera_id]
+                    if self._video_writer is None:
+                        frame = _prepare_video_frame(view, frame)
+                    self._video_frames[view].append(frame)
         video_finished = time.perf_counter()
         observation = self.transform_observation(raw_obs)
         finished = time.perf_counter()

@@ -105,6 +105,17 @@ and request background MP4 saving. They wait for the new policy and both resets
 before reading fresh observations. The last round starts no extra reset.
 Collection/eval/single-robot execution have their own reset/video paths.
 
+Eval and Online FT use the common WS `DroidEnv` video recorder. Each episode
+writes separate `side_<timestamp>_train_ep<NNNNNN>.mp4` and
+`wrist_<timestamp>_train_ep<NNNNNN>.mp4` files in the existing per-robot video
+directory. Each view keeps its capture resolution (for example, 1920×1080 side
+and 1280×720 wrist), before policy crop/resize/mirror; views are not joined or
+upscaled. Frames are recorded at observation reads, not every camera-buffer
+refresh. The existing playback FPS remains 30, so video duration is not a
+measurement of rollout duration. Async launchers prepare and encode the views
+sequentially in the same bounded episode worker, with two encoder threads.
+An explicitly configured recording camera still gets its own `record_*.mp4`.
+
 The online TUI shows total online transitions and per-robot transition counts.
 Episode counts, successes, last result and transitions continue across resume:
 the learner persists them in `split-<step>.json` and sends them with admission.

@@ -7,7 +7,6 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from client.envs.droid_env import DroidEnv, _prepare_video_frame
-from client.real_utils.vis_utils import raw_frame_from_raw_obs
 
 
 class BlankCameraTests(unittest.TestCase):
@@ -39,19 +38,21 @@ class BlankCameraTests(unittest.TestCase):
         with patch('client.envs.droid_env._prepare_video_frame', side_effect=prepare), \
              patch('client.envs.droid_env.save_episode_video_to_disk', side_effect=save):
             env = DroidEnv(**self.config, async_video=True, video_dir='unused', record_camera='side_left')
-        expected = {'raw': [], 'record': []}
+        expected = {'side': [], 'wrist': [], 'record': []}
         try:
             for value in (17, 83):
                 side = np.full((9, 16, 3), value, np.uint8)
-                wrist = np.full((9, 16, 3), value + 1, np.uint8)
+                wrist = np.full((6, 10, 3), value + 1, np.uint8)
                 raw = {'image': {'side_left': side, 'wrist_left': wrist, 'unused_right': side}}
                 self.reader.read_cameras.return_value = (raw, {})
-                expected['raw'].append(raw_frame_from_raw_obs(raw, 'side_left', 'wrist_left'))
+                expected['side'].append(side.copy())
+                expected['wrist'].append(wrist.copy())
                 expected['record'].append(_prepare_video_frame('record', side))
                 obs = env.get_observation()
                 self.assertNotIn('observation_timing', obs)
-                self.assertIs(env._raw_frame_buffer[-1][0]['image']['side_left'], side)
-                self.assertNotIn('unused_right', env._raw_frame_buffer[-1][0]['image'])
+                self.assertIs(env._video_frames['side'][-1], side)
+                self.assertIs(env._video_frames['wrist'][-1], wrist)
+                self.assertEqual(set(env._video_frames), {'side', 'wrist', 'record'})
             self.assertFalse(preparing.is_set(), 'Preparation ran in observation control loop')
             # Use the real done handler, with only detector/bounds mocked.
             env.reached_boundary = lambda _: False
@@ -61,8 +62,7 @@ class BlankCameraTests(unittest.TestCase):
             self.assertTrue(result[0])
             self.assertTrue(preparing.wait(1))
             self.assertEqual(saved, {})
-            self.assertEqual(env._raw_frame_buffer, [])
-            self.assertEqual(env._record_frame_buffer, [])
+            self.assertEqual(env._video_frames, {'side': [], 'wrist': [], 'record': []})
             # A following episode replaces its buffers without changing queued frames.
             self.reader.read_cameras.return_value = (
                 {'image': {'side_left': np.zeros((9,16,3),np.uint8),
@@ -75,6 +75,24 @@ class BlankCameraTests(unittest.TestCase):
             self.assertEqual(len(saved[(0, prefix)]), 2)
             for actual, reference in zip(saved[(0, prefix)], expected[prefix]):
                 np.testing.assert_array_equal(actual, reference)
+
+    def test_synchronous_video_saves_views_at_native_sizes(self):
+        side = np.full((12, 20, 3), (10, 20, 30), np.uint8)
+        wrist = np.full((6, 10, 3), (40, 50, 60), np.uint8)
+        self.reader.read_cameras.return_value = (
+            {'image': {'side_left': side, 'wrist_left': wrist}}, {})
+        env = DroidEnv(**self.config, video_dir='unused')
+        try:
+            env.get_observation()
+            env.reached_boundary = lambda _: False
+            with patch('client.envs.droid_env.save_episode_video_to_disk') as save:
+                env.get_info_for_step(manual_override='success')
+            self.assertEqual([c.kwargs['prefix'] for c in save.call_args_list], ['side', 'wrist'])
+            for call, original in zip(save.call_args_list, (side, wrist)):
+                self.assertEqual(call.args[2], 0)
+                np.testing.assert_array_equal(call.args[0][0], original[:, :, ::-1])
+        finally:
+            env.close()
 
     def test_observation_timing_keeps_images_and_uses_current_camera_timestamps(self):
         side = np.full((9, 16, 3), 73, np.uint8)
@@ -121,9 +139,10 @@ class BlankCameraTests(unittest.TestCase):
         obs = env.transform_observation(raw)
         np.testing.assert_array_equal(obs['exterior_image_1_left'], np.full((180, 320, 3), 73, np.uint8))
         self.assertFalse(obs['wrist_image_left'].any())
-        frame = raw_frame_from_raw_obs(raw, env.side_camera_id, env.wrist_camera_id)
-        self.assertEqual(frame.shape, (360, 1280, 3))
-        self.assertFalse(frame[:, 640:].any())
+        self.assertEqual(_prepare_video_frame('side', side).shape, (360, 640, 3))
+        frame = _prepare_video_frame('wrist', wrist)
+        self.assertEqual(frame.shape, (180, 320, 3))
+        self.assertFalse(frame.any())
         self.assertEqual(raw['camera_intrinsics'], {})  # No fabricated calibration.
 
     def test_all_blank_views_work_when_reader_has_no_image_dictionary(self):
