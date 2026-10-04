@@ -10,7 +10,10 @@ class SFTPolicy:
         self.config = checkpoint_config.load(checkpoint)
         if not getattr(self.config.data, 'use_cartesian_state', False) or self.config.data.output_action_dim != 7:
             raise ValueError('DROID evaluation requires Cartesian state and 7D actions')
-        self.policy = create_trained_policy(self.config, checkpoint, seed=seed, default_prompt=prompt)
+        # Keep the training checkpoint's frozen BF16 / trainable FP32 parameters.
+        self.policy = create_trained_policy(
+            self.config, checkpoint, seed=seed, default_prompt=prompt, params_dtype=None,
+        )
 
     def sample_actions(self, observation, only_base_actions=True):
         if not only_base_actions:

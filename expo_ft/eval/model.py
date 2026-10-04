@@ -51,8 +51,9 @@ def build(base, payload, task, seed=42, *, base_verified=False):
         full = merge_actor(base_trees['base'], trees['actor'], cfg)
         if meta['kind'] == 'sft':
             if set(trees) != {'actor'}: raise ValueError('Unexpected SFT weight groups')
-            # Match the existing SFT loader's BF16 inference casting.
-            params = jax.tree.map(lambda a: jnp.asarray(a, dtype=jnp.bfloat16), full)
+            # Frozen params are already BF16; preserve the trainable FP32 values.
+            # Own the arrays before the checkpoint's shared buffers are closed.
+            params = jax.tree.map(lambda a: jnp.array(a, copy=True), full)
             model = cfg.model.load(params, remove_extra_params=False)
             data = cfg.data.create(cfg.assets_dirs, cfg.model)
             result = SFTPolicy.__new__(SFTPolicy)

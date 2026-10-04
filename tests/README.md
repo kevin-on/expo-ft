@@ -164,6 +164,21 @@ Keep these bundles and live relay auxiliary files; they are not disposable logs.
   retain that repeat-control difference alongside the comparison results.
 - `gpu/checkpoint_config.py`: real SFT inference, one online update and independent checkpoint restore/action parity, using recorded observations only.
 
+`test_sft_precision.py` uses tiny NNX parameters to check full SFT loader dtype
+selection, compact reconstruction, exact FP32 LoRA/projection values, and array
+ownership after the shared buffers close. Use the matching learner versions
+(JAX 0.5.3, Flax 0.10.2, Orbax 0.11.13 from
+`docker/learner/requirements-tested.txt`); the separate `cpu/requirements.txt`
+uses a newer Flax API. OpenPI's companion `policy_config_test.py` additionally
+checks real Orbax restore and model loading, including the unchanged default
+BF16 behavior. These tests require no large weights, tokenizers or robot access:
+
+```bash
+JAX_PLATFORMS=cpu python -m pytest --noconftest -q tests/test_sft_precision.py
+# From the matching OpenPI checkout, in its normal dependency environment:
+JAX_PLATFORMS=cpu python -m pytest --noconftest -q src/openpi/policies/policy_config_test.py
+```
+
 If the read-only compute image lacks pytest, install it into node-local scratch:
 `python -m pip install --target /cache/test-deps pytest`, then prepend
 `/cache/test-deps` to `PYTHONPATH` for test commands only. Do not rebuild the shared

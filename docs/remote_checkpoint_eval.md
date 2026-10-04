@@ -1,9 +1,13 @@
 # RAM checkpoint evaluation
 
 Run from the `multi-robot` source and its matching OpenPI checkout
-(the checkpoint-owned config implementation, currently OpenPI `590fa99`).
+(OpenPI `fdd9299`, including checkpoint-owned config and dtype-preserving SFT loading).
 This adds an eval export/receiver; it does not change training checkpoint writes.
 Do not merge or substitute the older `checkpoint-config` eval implementation.
+
+Full and compact SFT evaluation preserve frozen BF16 and trainable FP32
+parameters. Compact evaluation copies the merged arrays before releasing the
+shared checkpoint buffers; it does not cast the trainable payload to BF16.
 
 New exports are saved as `checkpoints/<step>/trainable_weights.bin`, with unchanged
 binary contents and common `assets/` / `model_config/` files. Existing

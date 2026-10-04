@@ -98,6 +98,16 @@ or action-selection override. Its replan length comes from the saved record.
 Expose one GPU. A task mismatch or absent/incompatible metadata fails before any
 robot listener. Two-robot evaluation is a separate implementation stage.
 
+SFT evaluation preserves the training checkpoint's parameter dtypes: frozen
+parameters are BF16 and trainable parameters are FP32. Full evaluation opts out
+of OpenPI's default whole-model BF16 restore with `params_dtype=None`; compact
+evaluation preserves the trainable payload's dtype after combining it with the
+BF16 frozen base. Neither path rounds trainable parameters to BF16. This controls
+parameter loading; it does not force all model computations to FP32.
+This requires companion OpenPI `fdd929975ba2c0a7cea1c2d5802ce1b5bfa064b9`
+(`multi-robot`) or a descendant containing the `params_dtype` loader option.
+OpenPI is a separate checkout and must be updated together with EXPO.
+
 ## Old artifacts
 
 Old metadata is never silently interpreted using today's defaults. Explicit
