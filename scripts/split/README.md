@@ -158,6 +158,26 @@ The image provides libraries; source is bind-mounted over `/opt/expo-ft`.
 Do not assume code baked into an old image is current. Do not run the historical
 `access-setup/runtime.py` without checking its pinned EXPO/OpenPI versions.
 
+### OpenPI cache mount: writable even with pre-staged files
+
+For eval, inference and training, set `OPENPI_DATA_HOME=/model-cache` inside
+the container and bind the user-owned node-local cache with
+`--bind "$STAGE/model-cache:/model-cache"`, **without `:ro`**.
+Source and base-weight mounts can remain read-only.
+
+OpenPI's `get_cache_dir()` changes directory permissions even when the tokenizer
+is already present. A read-only cache mount therefore fails during tokenizer
+initialization with `OSError: [Errno 30] Read-only file system: '/model-cache'`.
+Loading a checkpoint into the receiver's CPU RAM does not exercise this path.
+When preparing a new launcher, run this check inside the actual container with
+the same environment and mounts before reporting it ready:
+
+```bash
+python -c 'from openpi.models.tokenizer import PaligemmaTokenizer; PaligemmaTokenizer(200)'
+```
+
+This checks tokenizer/cache access without opening robot or camera devices.
+
 ### Deploying a new code version
 
 For new code, publish/copy an explicit EXPO **and OpenPI** snapshot to both
